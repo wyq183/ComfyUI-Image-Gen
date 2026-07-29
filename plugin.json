@@ -1,13 +1,13 @@
 {
   "id": "qwenpaw-image-gen",
   "name": "生图助手",
-  "version": "0.4.1",
+  "version": "0.9.3",
   "type": "general",
-  "description": "本地 ComfyUI 生图可视化助手：模型与 LoRA 扫描、默认工作流切换、参数保存、图库评分、产物库联动归档，并加入桌面端缓存防护。",
+  "description": "本地 ComfyUI 生图可视化助手：确定性模型识别、完整资源扫描、Anima 工作流适配、参数保存、图库评分与产物库联动。",
   "author": "QwenPaw Image Gen Contributors",
   "entry": {
     "backend": "backend/plugin.py",
-    "frontend": "ui/index.0.4.1.js"
+    "frontend": "ui/index.0.9.3.js"
   },
   "dependencies": [
     "pillow>=10.0.0",
@@ -35,7 +35,13 @@
       "no-personal-workspace-paths",
       "desktop-cache-busting",
       "frontend-backend-version-check",
-      "no-cache-api-headers"
+      "no-cache-api-headers",
+      "deterministic-comfy-adapter",
+      "full-resource-scan",
+      "dynamic-sampler-scheduler",
+      "anima-qwen-workflow",
+      "workflow-bind-validation",
+      "auto-workflow-bind"
     ]
   }
 }

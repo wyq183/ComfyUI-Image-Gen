@@ -360,10 +360,44 @@
             h('img', { src: iurl(img.id), style: { width: '100%', height: '100%', objectFit: 'cover' } }));
         }) : h('div', { style: { gridColumn: '1/-1', paddingTop: 40 } }, h(Empty, { description: '还没有图片' }))
       ) : null,
-      preview[0] ? (function () { var img = (imgs[0] || []).find(function (x) { return x.id === preview[0]; }); return img ? h(Modal, { open: true, footer: null, width: 520, onCancel: function () { preview[1](null); } },
-        h('img', { src: iurl(img.id), style: { maxWidth: '100%', borderRadius: 8 } }),
-        h('div', { style: { marginTop: 8, textAlign: 'center' } }, h(Rate, { value: img.rating || 0, onChange: function (v) { req('/images/' + img.id + '/rating', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: v }) }).then(loadImages); } }))
-      ) : null; })() : null
+      preview[0] ? (function () { var img = (imgs[0] || []).find(function (x) { return x.id === preview[0]; }); if (!img) return null;
+        function copyText(t) { if (!t) return; if (navigator.clipboard) { navigator.clipboard.writeText(t).then(function () { message.success('已复制'); }) .catch(function () { message.info(t); }); } else { message.info(t); } }
+        function InfoRow(label, value, copyable) {
+          if (value === undefined || value === null || value === '') value = '—';
+          var display = String(value);
+          if (display.length > 120) display = display.substring(0, 120) + '...';
+          return h('div', { style: { marginBottom: 6 } },
+            h('div', { style: { fontSize: 11, color: 'var(--ant-color-text-tertiary)', marginBottom: 2 } }, label),
+            h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 6 } },
+              h('div', { style: { flex: 1, fontSize: 12, lineHeight: '18px', wordBreak: 'break-all', background: 'var(--ant-color-fill-secondary)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', maxHeight: 80, overflow: 'auto' } }, display),
+              copyable ? h(Button, { size: 'small', type: 'text', style: { flexShrink: 0, fontSize: 11 }, onClick: function () { copyText(String(value)); } }, '复制') : null
+            )
+          );
+        }
+        var recipeText = (img.prompt || '') + (img.negative_prompt ? '\nNegative: ' + img.negative_prompt : '') + '\nModel: ' + (img.model_name || '') + (img.lora_name ? '\nLoRA: ' + img.lora_name : '') + '\nSteps: ' + (img.steps || 20) + '  CFG: ' + (img.cfg || 7) + '  Seed: ' + (img.seed || -1) + '  Size: ' + (img.width || 1024) + 'x' + (img.height || 1024);
+        return h(Modal, { open: true, footer: null, width: 560, onCancel: function () { preview[1](null); },
+          styles: { body: { padding: '12px 16px', maxHeight: '80vh', overflowY: 'auto' } } },
+          h('img', { src: iurl(img.id), style: { width: '100%', borderRadius: 8, marginBottom: 12 } }),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+            h(Rate, { value: img.rating || 0, onChange: function (v) { req('/images/' + img.id + '/rating', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: v }) }).then(loadImages); } }),
+            h(Button, { size: 'small', onClick: function () { copyText(recipeText); } }, '复制全部参数')
+          ),
+          h(Divider, { style: { margin: '4px 0 10px' } }),
+          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' } },
+            InfoRow('模型', img.model_name, true),
+            InfoRow('LoRA', img.lora_name || '', true),
+            InfoRow('尺寸', (img.width || 1024) + ' × ' + (img.height || 1024), false),
+            InfoRow('文件大小', img.file_size ? (img.file_size / 1024).toFixed(1) + ' KB' : '', false),
+            InfoRow('Steps', img.steps, false),
+            InfoRow('CFG', img.cfg, false),
+            InfoRow('Seed', img.seed, false),
+            InfoRow('生成时间', img.created_at || img.generated_at, false)
+          ),
+          h(Divider, { style: { margin: '8px 0 10px' } }),
+          InfoRow('正向提示词', img.prompt, true),
+          InfoRow('反向提示词', img.negative_prompt || '', true)
+        );
+      })() : null
     );
   }
 

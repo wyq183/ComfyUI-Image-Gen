@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local runtime data and logs
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Build outputs and installation copies
+package/
+*.zip
+_install_*/
+
+# Local one-off patches / development scratch files
+_patch_*.py
+_verify_*.py
+check_*.py
+check_*.js
+*_test_output*.png
+*.tmp
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

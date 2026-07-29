@@ -104,7 +104,7 @@
 
   function GenPanel() {
     var s = React.useState;
-    var state = s(null), model = s(''), tab = s('gen'), imgs = s([]), preview = s(null), busy = s(false), scanning = s(false);
+    var state = s(null), model = s(''), tab = s('gen'), imgs = s([]), preview = s(null), busy = s(false), scanning = s(false), category = s('未分类'), categories = s(['未分类']);
     var scanFailed = s(false);  // 扫描失败时置 true，让「复制 AI 提示词」按钮切换为找 ComfyUI 的提示词
     var versionMismatch = s('');
     var prompt = s(''), neg = s(''), loras = s([]), params = s({}), workflowPreset = s(0);
@@ -121,9 +121,12 @@
         params[1](schemaDefault(d.params_schema || {}));
       }).catch(function (e) { message.error(e.message); });
     }
-    function loadImages() { req('/images').then(function (d) { imgs[1](d.items || []); }).catch(function () {}); }
+    function loadImages() { req('/images?category=' + encodeURIComponent(category[0])).then(function (d) { imgs[1](d.items || []); }).catch(function () {}); }
+    function loadCategories() { req('/gallery/categories').then(function (d) { categories[1](d.categories || ['未分类']); }).catch(function () {}); }
+    function scanGallery() { req('/gallery/scan', { method: 'POST' }).then(function (d) { message.success('已扫描 ' + (d.added || 0) + ' 张图片'); loadCategories(); loadImages(); }).catch(function (e) { message.error(e.message); }); }
     React.useEffect(function () {
       load();
+      loadCategories();
       loadImages();
       req('/version?_=' + Date.now()).then(function (v) {
         if (v && v.version && FRONTEND_VERSION && v.version !== FRONTEND_VERSION) {
@@ -252,7 +255,7 @@
       req('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
         prompt: prompt[0], negative_prompt: neg[0], model_name: model[0],
         steps: p.steps || 20, cfg: p.cfg || 7, seed: p.seed === undefined ? -1 : p.seed,
-        width: p.width || 1024, height: p.height || 1024, batch_size: p.batch_size || 1,
+        width: p.width || 1024, height: p.height || 1024, batch_size: p.batch_size || 1, category: category[0],
         sampler_name: p.sampler_name || 'euler', scheduler: p.scheduler || 'normal', denoise: p.denoise === undefined ? 1 : p.denoise,
         loras: loras[0].filter(function (x) { return x.enabled && x.name; })
       }) }).then(function (r) {
@@ -279,7 +282,7 @@
       ),
       h('div', { style: { display: 'flex', borderBottom: '1px solid var(--border-color-split)' } },
         h(Button, { type: tab[0] === 'gen' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('gen'); } }, '工作流'),
-        h(Button, { type: tab[0] === 'gallery' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('gallery'); } }, '图库(' + (imgs[0] || []).length + ')')
+        h(Button, { type: tab[0] === 'gallery' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('gallery'); loadCategories(); loadImages(); } }, '图库(' + (imgs[0] || []).length + ')')
       ),
       versionMismatch[0] ? h(Alert, { type: 'warning', showIcon: true, message: '缓存版本不一致', description: versionMismatch[0], style: { margin: 10 } }) : null,
       tab[0] === 'gen' ? h('div', { style: { flex: 1, overflowY: 'auto' } },
@@ -354,16 +357,57 @@
           )
         )
       ) : null,
-      tab[0] === 'gallery' ? h('div', { style: { flex: 1, overflowY: 'auto', padding: 8, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, alignContent: 'start' } },
-        (imgs[0] || []).length ? imgs[0].map(function (img) {
-          return h('div', { key: img.id, onClick: function () { preview[1](img.id); }, style: { aspectRatio: '1/1', border: '1px solid var(--border-color-split)', borderRadius: 6, overflow: 'hidden', cursor: 'pointer' } },
-            h('img', { src: iurl(img.id), style: { width: '100%', height: '100%', objectFit: 'cover' } }));
-        }) : h('div', { style: { gridColumn: '1/-1', paddingTop: 40 } }, h(Empty, { description: '还没有图片' }))
+      tab[0] === 'gallery' ? h(React.Fragment, null,
+        h('div', { style: { padding: 8, display: 'flex', gap: 6, borderBottom: '1px solid var(--border-color-split)' } },
+          h(Select, { size: 'small', value: category[0], style: { flex: 1 }, options: categories[0].map(function (x) { return { value: x, label: x }; }), onChange: function (v) { category[1](v); loadImages(); } }),
+          h(Button, { size: 'small', onClick: scanGallery }, '扫描 ComfyUI'),
+          h(Button, { size: 'small', onClick: function () { var n = window.prompt('新建分类名称'); if (!n || !n.trim()) return; req('/gallery/categories/create?name=' + encodeURIComponent(n.trim()), { method: 'POST' }).then(function () { loadCategories(); category[1](n.trim()); loadImages(); }).catch(function (e) { message.error(e.message); }); } }, '+ 分类')
+        ),
+        h('div', { style: { flex: 1, overflowY: 'auto', padding: 8, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, alignContent: 'start' } },
+          (imgs[0] || []).length ? imgs[0].map(function (img) {
+            return h('div', { key: img.id, onClick: function () { preview[1](img.id); }, style: { aspectRatio: '1/1', border: '1px solid var(--border-color-split)', borderRadius: 6, overflow: 'hidden', cursor: 'pointer' } },
+              h('img', { src: iurl(img.id), style: { width: '100%', height: '100%', objectFit: 'cover' } }));
+          }) : h('div', { style: { gridColumn: '1/-1', paddingTop: 40 } }, h(Empty, { description: '还没有图片' }))
+        )
       ) : null,
-      preview[0] ? (function () { var img = (imgs[0] || []).find(function (x) { return x.id === preview[0]; }); return img ? h(Modal, { open: true, footer: null, width: 520, onCancel: function () { preview[1](null); } },
-        h('img', { src: iurl(img.id), style: { maxWidth: '100%', borderRadius: 8 } }),
-        h('div', { style: { marginTop: 8, textAlign: 'center' } }, h(Rate, { value: img.rating || 0, onChange: function (v) { req('/images/' + img.id + '/rating', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: v }) }).then(loadImages); } }))
-      ) : null; })() : null
+      preview[0] ? (function () { var img = (imgs[0] || []).find(function (x) { return x.id === preview[0]; }); if (!img) return null;
+        function copyText(t) { if (!t) return; if (navigator.clipboard) { navigator.clipboard.writeText(t).then(function () { message.success('已复制'); }) .catch(function () { message.info(t); }); } else { message.info(t); } }
+        function InfoRow(label, value, copyable) {
+          if (value === undefined || value === null || value === '') value = '—';
+          var display = String(value);
+          if (display.length > 120) display = display.substring(0, 120) + '...';
+          return h('div', { style: { marginBottom: 6 } },
+            h('div', { style: { fontSize: 11, color: 'var(--ant-color-text-tertiary)', marginBottom: 2 } }, label),
+            h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 6 } },
+              h('div', { style: { flex: 1, fontSize: 12, lineHeight: '18px', wordBreak: 'break-all', background: 'var(--ant-color-fill-secondary)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', maxHeight: 80, overflow: 'auto' } }, display),
+              copyable ? h(Button, { size: 'small', type: 'text', style: { flexShrink: 0, fontSize: 11 }, onClick: function () { copyText(String(value)); } }, '复制') : null
+            )
+          );
+        }
+        var recipeText = (img.prompt || '') + (img.negative_prompt ? '\nNegative: ' + img.negative_prompt : '') + '\nModel: ' + (img.model_name || '') + (img.lora_name ? '\nLoRA: ' + img.lora_name : '') + '\nSteps: ' + (img.steps || 20) + '  CFG: ' + (img.cfg || 7) + '  Seed: ' + (img.seed || -1) + '  Size: ' + (img.width || 1024) + 'x' + (img.height || 1024);
+        return h(Modal, { open: true, footer: null, width: 560, onCancel: function () { preview[1](null); },
+          styles: { body: { padding: '12px 16px', maxHeight: '80vh', overflowY: 'auto' } } },
+          h('img', { src: iurl(img.id), style: { width: '100%', borderRadius: 8, marginBottom: 12 } }),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+            h(Rate, { value: img.rating || 0, onChange: function (v) { req('/images/' + img.id + '/rating', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: v }) }).then(loadImages); } }),
+            h(Button, { size: 'small', onClick: function () { copyText(recipeText); } }, '复制全部参数')
+          ),
+          h(Divider, { style: { margin: '4px 0 10px' } }),
+          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' } },
+            InfoRow('模型', img.model_name, true),
+            InfoRow('LoRA', img.lora_name || '', true),
+            InfoRow('尺寸', (img.width || 1024) + ' × ' + (img.height || 1024), false),
+            InfoRow('文件大小', img.file_size ? (img.file_size / 1024).toFixed(1) + ' KB' : '', false),
+            InfoRow('Steps', img.steps, false),
+            InfoRow('CFG', img.cfg, false),
+            InfoRow('Seed', img.seed, false),
+            InfoRow('生成时间', img.created_at || img.generated_at, false)
+          ),
+          h(Divider, { style: { margin: '8px 0 10px' } }),
+          InfoRow('正向提示词', img.prompt, true),
+          InfoRow('反向提示词', img.negative_prompt || '', true)
+        );
+      })() : null
     );
   }
 

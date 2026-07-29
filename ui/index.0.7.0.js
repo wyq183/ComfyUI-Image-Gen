@@ -30,7 +30,7 @@
       return r.json().then(function (b) { if (!r.ok) throw new Error(b.detail || '请求失败'); return b; });
     });
   }
-  function iurl(id) { return '/api/image-gen/images/' + id + '/file'; }
+  function iurl(id) { return '/image-gen/images/' + id + '/file'; }
   function isOn() { return localStorage.getItem(pid + '-enabled') !== '0'; }
   function setOn(v) { localStorage.setItem(pid + '-enabled', v ? '1' : '0'); }
   var listeners = [];
@@ -328,29 +328,6 @@
           h(Section, { title: '5. 工作流参数' },
             Object.keys(schema).length ? Object.keys(schema).map(function (k) { return h(ParamControl, { key: k, name: k, def: schema[k], value: params[0][k], setValue: setParam }); }) : h(Alert, { type: 'warning', message: '工作流没有暴露可调参数' }),
             h(Button, { type: 'primary', block: true, loading: busy[0], disabled: busy[0] || !prompt[0].trim(), onClick: doGen }, '✨ 按当前工作流生图')
-          ),
-          h(Section, { title: '6. 调试信息' },
-            h('div', { style: { fontSize: 11, color: 'var(--ant-color-text-secondary)', marginBottom: 8 } },
-              '提示词会原样发送到 ComfyUI，不会被AI改写。如果生成结果与预期不符，请检查：'
-            ),
-            h('ul', { style: { fontSize: 11, color: 'var(--ant-color-text-secondary)', margin: 0, paddingLeft: 16 } },
-              h('li', null, '提示词是否包含特殊字符导致解析错误'),
-              h('li', null, '模型是否支持你使用的标签（如 LoRA 触发词）'),
-              h('li', null, 'CFG 值是否过高导致过度拟合')
-            ),
-            h('div', { style: { marginTop: 8, padding: '8px', background: 'var(--ant-color-bg-layout)', borderRadius: 4, fontSize: 11 } },
-              h('div', { style: { fontWeight: 700, marginBottom: 4 } }, '最后一次发送的提示词：'),
-              h('div', { style: { wordBreak: 'break-all', maxHeight: 80, overflowY: 'auto', whiteSpace: 'pre-wrap' } }, prompt[0] || '（空）')
-            ),
-            h('div', { style: { marginTop: 8, padding: '8px', background: 'var(--ant-color-bg-layout)', borderRadius: 4, fontSize: 11 } },
-              h('div', { style: { fontWeight: 700, marginBottom: 4 } }, 'ComfyUI 画布同步说明：'),
-              h('div', { style: { color: 'var(--ant-color-text-secondary)' } },
-                '本插件通过 API 提交工作流 JSON 到 ComfyUI 执行，但不会改变 ComfyUI 画布显示。'
-              ),
-              h('div', { style: { color: 'var(--ant-color-text-secondary)', marginTop: 4 } },
-                '如需在 ComfyUI 画布中查看/编辑工作流，请手动在 ComfyUI 中加载对应的 workflow JSON。'
-              )
-            )
           )
         )
       ) : null,

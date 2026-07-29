@@ -1,5 +1,5 @@
 /**
- * QwenPaw 生图助手 — v0.4.1
+ * QwenPaw 生图助手
  * 工作流驱动右侧栏：主模型 → 工作流预设 → LoRA → 提示词 → 动态参数
  */
 (function () {
@@ -12,8 +12,16 @@
     Alert = antd.Alert, Divider = antd.Divider, Modal = antd.Modal, Rate = antd.Rate,
     message = antd.message, Empty = antd.Empty;
   var pid = 'qwenpaw-image-gen';
-  var FRONTEND_VERSION = '0.4.1';
+  var FRONTEND_VERSION = '';  // 从后端读取，不再硬编码
   var versionWarning = { current: '' };
+
+  // 启动时从后端读取版本号（唯一定义源是 plugin.json）
+  function fetchVersion() {
+    return req('/version?_=' + Date.now()).then(function (v) {
+      if (v && v.version) FRONTEND_VERSION = v.version;
+    }).catch(function () {});
+  }
+  fetchVersion();
 
   function req(p, o) {
     o = o || {};
@@ -22,7 +30,7 @@
       return r.json().then(function (b) { if (!r.ok) throw new Error(b.detail || '请求失败'); return b; });
     });
   }
-  function iurl(id) { return '/image-gen/images/' + id + '/file'; }
+  function iurl(id) { return '/api/image-gen/images/' + id + '/file'; }
   function isOn() { return localStorage.getItem(pid + '-enabled') !== '0'; }
   function setOn(v) { localStorage.setItem(pid + '-enabled', v ? '1' : '0'); }
   var listeners = [];
@@ -70,9 +78,34 @@
     );
   }
 
+  // Error Boundary：防止插件崩溃导致 QwenPaw 整体白屏
+  function ErrorBoundary(props) {
+    var s = React.useState(null);
+    var err = s[0], setErr = s[1];
+    if (err) {
+      return h('div', { style: { padding: 16, color: '#ff4d4f' } },
+        h('b', null, '⚠ 生图助手出错了'),
+        h('p', { style: { fontSize: 12, marginTop: 8 } }, String(err.message || err)),
+        h(Button, { size: 'small', onClick: function () { setErr(null); }, style: { marginTop: 8 } }, '重试')
+      );
+    }
+    return React.createElement(ErrorBoundaryInner, { onError: setErr, children: props.children });
+  }
+  function ErrorBoundaryInner(props) {
+    var s = React.useState(false);
+    React.useEffect(function () {
+      var prev = window.onerror;
+      window.onerror = function (msg) { props.onError(new Error(msg)); return true; };
+      return function () { window.onerror = prev; };
+    }, []);
+    if (s[0]) return null;
+    return props.children;
+  }
+
   function GenPanel() {
     var s = React.useState;
-    var state = s(null), model = s(''), tab = s('gen'), imgs = s([]), preview = s(null), busy = s(false);
+    var state = s(null), model = s(''), tab = s('gen'), imgs = s([]), preview = s(null), busy = s(false), scanning = s(false);
+    var scanFailed = s(false);  // 扫描失败时置 true，让「复制 AI 提示词」按钮切换为找 ComfyUI 的提示词
     var versionMismatch = s('');
     var prompt = s(''), neg = s(''), loras = s([]), params = s({}), workflowPreset = s(0);
 
@@ -93,8 +126,8 @@
       load();
       loadImages();
       req('/version?_=' + Date.now()).then(function (v) {
-        if (v && v.version && v.version !== FRONTEND_VERSION) {
-          var msg = '检测到生图助手前端缓存未更新：前端 v' + FRONTEND_VERSION + ' / 后端 v' + v.version + '。请完全退出并重启 QwenPaw Desktop；若仍旧，请清理桌面端 WebView Cache 和 Code Cache。';
+        if (v && v.version && FRONTEND_VERSION && v.version !== FRONTEND_VERSION) {
+          var msg = '版本不一致：前端 v' + FRONTEND_VERSION + ' / 后端 v' + v.version + '。请完全退出并重启 QwenPaw Desktop。';
           versionMismatch[1](msg);
           if (!versionWarning.current) { versionWarning.current = msg; message.warning(msg, 8); }
         }
@@ -132,6 +165,60 @@
       }).catch(function (e) { message.error(e.message); });
     }
 
+    function autoBindWorkflow() {
+      scanning[1](true);
+      // 一键适配：全自动，不需要传模型名
+      req('/workflows/one-click-setup', { method: 'POST' }).then(function (r) {
+        scanning[1](false);
+        scanFailed[1](false);
+        var s = r.summary || {};
+        message.success(r.message + ' | ' + (s.total_models || 0) + ' 个模型、' + (s.loras || 0) + ' 个 LoRA、' + (s.samplers || 0) + ' 个采样器');
+        // 刷新面板状态，选中自动绑定的模型
+        load(r.selected_model, 0);
+      }).catch(function (e) {
+        scanning[1](false);
+        // 区分"找不到 ComfyUI"和"其他错误"
+        if (e.message && e.message.indexOf('未找到') >= 0) {
+          scanFailed[1](true);
+          message.warning(e.message);
+        } else {
+          message.error('一键适配失败：' + e.message);
+        }
+      });
+    }
+
+    function requestAIFindComfyUI() {
+      // 扫描失败时的兜底提示词：让 AI 通过 skill 手动配置 ComfyUI 连接
+      var text = [
+        '小琪，我的生图插件自动扫描没找到 ComfyUI，请帮我手动配置。',
+        '',
+        '我的 ComfyUI 可能：',
+        '· 用了非标准端口（不在 8000~9000 范围）',
+        '· 装在二级目录，端口自动分配到了意料之外的地方',
+        '· 或者还没启动',
+        '',
+        '请帮我：',
+        '1. 先确认 ComfyUI 是否已启动 —— 如果没启动，告诉我怎么启动',
+        '2. 如果启动了，帮我找出它实际在哪个端口上监听（可以看 ComfyUI 启动窗口的输出，通常有 "To see the GUI go to: http://127.0.0.1:XXXX" 这行）',
+        '3. 找到端口后，用 PATCH /image-gen/config/comfyui_api_url 手动设置，例如：',
+        '   curl -X PATCH http://127.0.0.1:14999/image-gen/config/comfyui_api_url -H "Content-Type: application/json" -d \'{"value":"http://127.0.0.1:9188"}\'',
+        '4. 设置完后，调用 GET /image-gen/status 确认连接成功',
+        '5. 连接成功后告诉我，我回插件点「一键自动适配」继续绑定工作流',
+        '',
+        'ComfyUI 启动窗口的输出示例：',
+        '  Total VRAM 6144 MB, total RAM 16384 MB',
+        '  To see the GUI go to: http://127.0.0.1:9188',
+        '（看最后一行的端口号就行）'
+      ].join('\n');
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text)
+          .then(function () { message.success('已复制 ComfyUI 手动配置提示词，请粘贴到主聊天框发送。'); })
+          .catch(function () { message.info('请手动复制提示词到主聊天框发送。'); });
+      } else {
+        message.info('当前环境不支持自动复制，请手动复制提示词到主聊天框发送。');
+      }
+    }
+
     function requestAIWorkflow() {
       var text = [
         '小琪，请为我的 ComfyUI 主模型创建并绑定一个生图工作流。',
@@ -158,6 +245,8 @@
     function doGen() {
       if (!state[0] || !state[0].has_workflow) return message.warning('请先绑定工作流');
       if (!prompt[0].trim()) return message.warning('先写提示词～');
+      if (prompt[0].length > 2000) return message.warning('提示词太长了，最多2000字符');
+      if (neg[0].length > 1000) return message.warning('负向提示词太长了，最多1000字符');
       busy[1](true);
       var p = Object.assign({}, params[0]);
       req('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
@@ -182,8 +271,11 @@
 
     return h(React.Fragment, null,
       h('div', { style: { padding: '10px 12px', borderBottom: '1px solid var(--border-color-split)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
-        h('div', null, h('div', { style: { fontWeight: 700 } }, '✨ 生图助手'), h('div', { style: { fontSize: 10, color: 'var(--ant-color-text-secondary)' } }, '工作流驱动面板 · v' + FRONTEND_VERSION)),
-        h(Button, { type: 'text', size: 'small', icon: I && I.CloseOutlined ? h(I.CloseOutlined) : null, onClick: function () { setOn(false); emitToggle(false); toggleUI(false); } })
+        h('div', null, h('div', { style: { fontWeight: 700 } }, '✨ 生图助手'), h('div', { style: { fontSize: 10, color: 'var(--ant-color-text-secondary)' } }, '确定性适配面板 · v' + FRONTEND_VERSION)),
+        h('div', { style: { display: 'flex', gap: 4 } },
+          h(Button, { type: 'text', size: 'small', icon: I && I.ReloadOutlined ? h(I.ReloadOutlined) : null, onClick: function () { message.loading('正在刷新扫描...'); load(model[0], workflowPreset[0]); }, title: '刷新模型/采样器/调度器' }, '刷新'),
+          h(Button, { type: 'text', size: 'small', icon: I && I.CloseOutlined ? h(I.CloseOutlined) : null, onClick: function () { setOn(false); emitToggle(false); toggleUI(false); } })
+        )
       ),
       h('div', { style: { display: 'flex', borderBottom: '1px solid var(--border-color-split)' } },
         h(Button, { type: tab[0] === 'gen' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('gen'); } }, '工作流'),
@@ -208,9 +300,10 @@
             binding ? ((binding.workflow_name || binding.workflow_id) + ' · 可直接生图') : '没有可用工作流')
         ),
         !hasWorkflow ? h(Section, { title: '等待工作流' },
-          h(Alert, { type: 'info', showIcon: true, message: '先让 AI 为这个模型创建 ComfyUI 工作流', description: '没有工作流时，面板不会显示 LoRA、提示词和具体参数，避免出现“看似能调但实际不对应节点”的假表单。' }),
+          h(Alert, { type: 'info', showIcon: true, message: '点击「一键自动适配」即可开始', description: '插件会自动找到 ComfyUI、扫描模型和 LoRA、选择最优模型并绑定工作流，无需手动操作。' }),
           h('div', { style: { display: 'flex', gap: 6, marginTop: 10 } },
-            h(Button, { type: 'primary', size: 'small', onClick: requestAIWorkflow, block: true }, '复制/填入 AI 工作流提示词')
+            h(Button, { type: 'primary', size: 'small', onClick: autoBindWorkflow, loading: scanning[0], disabled: scanning[0], block: true }, scanning[0] ? '扫描中...' : '一键自动适配'),
+            h(Button, { size: 'small', onClick: scanFailed[0] ? requestAIFindComfyUI : requestAIWorkflow, block: true }, scanFailed[0] ? '复制 AI 提示词（找 ComfyUI）' : '复制 AI 提示词')
           )
         ) : h(React.Fragment, null,
           h(Section, { title: '3. LoRA', extra: binding && Number(binding.supports_lora) ? h(Button, { size: 'small', onClick: addLora }, '+ 添加') : null },
@@ -229,12 +322,35 @@
             }) : h(Empty, { image: Empty.PRESENTED_IMAGE_SIMPLE, description: '未添加 LoRA' })) : h(Alert, { type: 'warning', message: '当前工作流未暴露 LoRA 节点' })
           ),
           h(Section, { title: '4. 提示词' },
-            h(Input.TextArea, { rows: 3, value: prompt[0], placeholder: '正向提示词...', onChange: function (e) { prompt[1](e.target.value); }, style: { marginBottom: 6, fontSize: 12 } }),
-            binding && Number(binding.supports_negative_prompt) ? h(Input.TextArea, { rows: 2, value: neg[0], placeholder: '负向提示词...', onChange: function (e) { neg[1](e.target.value); }, style: { fontSize: 12 } }) : null
+            h(Input.TextArea, { rows: 3, value: prompt[0], placeholder: '正向提示词...', maxLength: 2000, onChange: function (e) { prompt[1](e.target.value); }, style: { marginBottom: 6, fontSize: 12 } }),
+            binding && Number(binding.supports_negative_prompt) ? h(Input.TextArea, { rows: 2, value: neg[0], placeholder: '负向提示词...', maxLength: 1000, onChange: function (e) { neg[1](e.target.value); }, style: { fontSize: 12 } }) : null
           ),
           h(Section, { title: '5. 工作流参数' },
             Object.keys(schema).length ? Object.keys(schema).map(function (k) { return h(ParamControl, { key: k, name: k, def: schema[k], value: params[0][k], setValue: setParam }); }) : h(Alert, { type: 'warning', message: '工作流没有暴露可调参数' }),
             h(Button, { type: 'primary', block: true, loading: busy[0], disabled: busy[0] || !prompt[0].trim(), onClick: doGen }, '✨ 按当前工作流生图')
+          ),
+          h(Section, { title: '6. 调试信息' },
+            h('div', { style: { fontSize: 11, color: 'var(--ant-color-text-secondary)', marginBottom: 8 } },
+              '提示词会原样发送到 ComfyUI，不会被AI改写。如果生成结果与预期不符，请检查：'
+            ),
+            h('ul', { style: { fontSize: 11, color: 'var(--ant-color-text-secondary)', margin: 0, paddingLeft: 16 } },
+              h('li', null, '提示词是否包含特殊字符导致解析错误'),
+              h('li', null, '模型是否支持你使用的标签（如 LoRA 触发词）'),
+              h('li', null, 'CFG 值是否过高导致过度拟合')
+            ),
+            h('div', { style: { marginTop: 8, padding: '8px', background: 'var(--ant-color-bg-layout)', borderRadius: 4, fontSize: 11 } },
+              h('div', { style: { fontWeight: 700, marginBottom: 4 } }, '最后一次发送的提示词：'),
+              h('div', { style: { wordBreak: 'break-all', maxHeight: 80, overflowY: 'auto', whiteSpace: 'pre-wrap' } }, prompt[0] || '（空）')
+            ),
+            h('div', { style: { marginTop: 8, padding: '8px', background: 'var(--ant-color-bg-layout)', borderRadius: 4, fontSize: 11 } },
+              h('div', { style: { fontWeight: 700, marginBottom: 4 } }, 'ComfyUI 画布同步说明：'),
+              h('div', { style: { color: 'var(--ant-color-text-secondary)' } },
+                '本插件通过 API 提交工作流 JSON 到 ComfyUI 执行，但不会改变 ComfyUI 画布显示。'
+              ),
+              h('div', { style: { color: 'var(--ant-color-text-secondary)', marginTop: 4 } },
+                '如需在 ComfyUI 画布中查看/编辑工作流，请手动在 ComfyUI 中加载对应的 workflow JSON。'
+              )
+            )
           )
         )
       ) : null,
@@ -244,10 +360,44 @@
             h('img', { src: iurl(img.id), style: { width: '100%', height: '100%', objectFit: 'cover' } }));
         }) : h('div', { style: { gridColumn: '1/-1', paddingTop: 40 } }, h(Empty, { description: '还没有图片' }))
       ) : null,
-      preview[0] ? (function () { var img = (imgs[0] || []).find(function (x) { return x.id === preview[0]; }); return img ? h(Modal, { open: true, footer: null, width: 520, onCancel: function () { preview[1](null); } },
-        h('img', { src: iurl(img.id), style: { maxWidth: '100%', borderRadius: 8 } }),
-        h('div', { style: { marginTop: 8, textAlign: 'center' } }, h(Rate, { value: img.rating || 0, onChange: function (v) { req('/images/' + img.id + '/rating', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: v }) }).then(loadImages); } }))
-      ) : null; })() : null
+      preview[0] ? (function () { var img = (imgs[0] || []).find(function (x) { return x.id === preview[0]; }); if (!img) return null;
+        function copyText(t) { if (!t) return; if (navigator.clipboard) { navigator.clipboard.writeText(t).then(function () { message.success('已复制'); }) .catch(function () { message.info(t); }); } else { message.info(t); } }
+        function InfoRow(label, value, copyable) {
+          if (value === undefined || value === null || value === '') value = '—';
+          var display = String(value);
+          if (display.length > 120) display = display.substring(0, 120) + '...';
+          return h('div', { style: { marginBottom: 6 } },
+            h('div', { style: { fontSize: 11, color: 'var(--ant-color-text-tertiary)', marginBottom: 2 } }, label),
+            h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 6 } },
+              h('div', { style: { flex: 1, fontSize: 12, lineHeight: '18px', wordBreak: 'break-all', background: 'var(--ant-color-fill-secondary)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', maxHeight: 80, overflow: 'auto' } }, display),
+              copyable ? h(Button, { size: 'small', type: 'text', style: { flexShrink: 0, fontSize: 11 }, onClick: function () { copyText(String(value)); } }, '复制') : null
+            )
+          );
+        }
+        var recipeText = (img.prompt || '') + (img.negative_prompt ? '\nNegative: ' + img.negative_prompt : '') + '\nModel: ' + (img.model_name || '') + (img.lora_name ? '\nLoRA: ' + img.lora_name : '') + '\nSteps: ' + (img.steps || 20) + '  CFG: ' + (img.cfg || 7) + '  Seed: ' + (img.seed || -1) + '  Size: ' + (img.width || 1024) + 'x' + (img.height || 1024);
+        return h(Modal, { open: true, footer: null, width: 560, onCancel: function () { preview[1](null); },
+          styles: { body: { padding: '12px 16px', maxHeight: '80vh', overflowY: 'auto' } } },
+          h('img', { src: iurl(img.id), style: { width: '100%', borderRadius: 8, marginBottom: 12 } }),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+            h(Rate, { value: img.rating || 0, onChange: function (v) { req('/images/' + img.id + '/rating', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: v }) }).then(loadImages); } }),
+            h(Button, { size: 'small', onClick: function () { copyText(recipeText); } }, '复制全部参数')
+          ),
+          h(Divider, { style: { margin: '4px 0 10px' } }),
+          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' } },
+            InfoRow('模型', img.model_name, true),
+            InfoRow('LoRA', img.lora_name || '', true),
+            InfoRow('尺寸', (img.width || 1024) + ' × ' + (img.height || 1024), false),
+            InfoRow('文件大小', img.file_size ? (img.file_size / 1024).toFixed(1) + ' KB' : '', false),
+            InfoRow('Steps', img.steps, false),
+            InfoRow('CFG', img.cfg, false),
+            InfoRow('Seed', img.seed, false),
+            InfoRow('生成时间', img.created_at || img.generated_at, false)
+          ),
+          h(Divider, { style: { margin: '8px 0 10px' } }),
+          InfoRow('正向提示词', img.prompt, true),
+          InfoRow('反向提示词', img.negative_prompt || '', true)
+        );
+      })() : null
     );
   }
 
@@ -280,18 +430,117 @@
       panel.classList.toggle('open'); btn.classList.toggle('open');
     };
     var RD = window.ReactDOM || Q.host.ReactDOM;
-    if (RD && RD.createRoot) RD.createRoot(panel).render(h(GenPanel)); else if (RD) RD.render(h(GenPanel), panel);
+    if (RD && RD.createRoot) RD.createRoot(panel).render(h(ErrorBoundary, null, h(GenPanel))); else if (RD) RD.render(h(ErrorBoundary, null, h(GenPanel)), panel);
     onToggle(toggleUI);
   }
   if (document.readyState === 'complete') injectUI(); else window.addEventListener('load', injectUI);
 
   if (Q.menu && Q.route) {
-    Q.route.add(pid, { id: pid + '.settings', path: '/image-gen-settings', component: function () { return h('div', { style: { padding: 40 } }, '生图助手由左侧开关控制，右侧 ✨ 按钮展开面板。'); } });
+    function RepairPanel() {
+      var repairing = React.useState(false);
+      var step1 = React.useState(false);   // 第一次确认弹窗
+      var step2 = React.useState(false);   // 第二次最终确认弹窗
+      var result = React.useState(null);
+
+      function doRepair() {
+        repairing[1](true);
+        req('/repair', { method: 'POST' }).then(function (r) {
+          result[1](r);
+          repairing[1](false);
+          step2[1](false);
+          message.success(r.message || '已恢复出厂设置');
+          scanFailed[1](false);
+          setTimeout(function () { window.location.reload(); }, 3000);
+        }).catch(function (e) {
+          repairing[1](false);
+          message.error('修复失败：' + e.message);
+        });
+      }
+
+      return h('div', { style: { padding: 40, maxWidth: 600 } },
+        h('h2', null, '🛠️ 生图助手 · 设置'),
+        h('p', { style: { color: 'var(--ant-color-text-secondary)', marginBottom: 20 } }, '版本：v' + FRONTEND_VERSION),
+        h(Divider, null),
+        h('h3', { style: { color: 'var(--ant-color-error)' } }, '⚠️ 强制修复'),
+        h('p', null, '强制修复会清空所有数据，恢复到刚安装插件时的状态：'),
+        h('ul', { style: { marginBottom: 20 } },
+          h('li', null, '❌ 删除所有工作流绑定'),
+          h('li', null, '❌ 删除所有工作流预设'),
+          h('li', null, '❌ 删除所有图库图片（含文件）'),
+          h('li', null, '❌ 重置 ComfyUI 连接配置'),
+          h('li', null, '❌ 清除所有生图配方')
+        ),
+        h('p', { style: { color: 'var(--ant-color-error)', fontWeight: 700, fontSize: 14 } }, '⚠️ 此操作不可撤销！数据将永久丢失！'),
+        h(Button, {
+          type: 'primary', danger: true,
+          onClick: function () { step1[1](true); },
+          loading: repairing[0], disabled: repairing[0]
+        }, '强制修复'),
+        result[0] ? h(Alert, {
+          type: 'success', showIcon: true,
+          message: '修复完成',
+          description: result[0].message + '（3秒后自动刷新页面）',
+          style: { marginTop: 20 }
+        }) : null,
+
+        // ── 第一步确认弹窗 ──
+        h(Modal, {
+          title: '⚠️ 第一步确认：了解后果',
+          open: step1[0],
+          onOk: function () { step1[1](false); step2[1](true); },
+          onCancel: function () { step1[1](false); },
+          okText: '我已知晓后果，继续',
+          okButtonProps: { danger: true },
+          cancelText: '取消',
+          width: 520
+        },
+          h('p', { style: { fontSize: 14, marginBottom: 12 } }, '强制修复将执行以下操作：'),
+          h('ul', { style: { lineHeight: 2 } },
+            h('li', null, '🗑️ 删除所有工作流绑定（模型与工作流的关联）'),
+            h('li', null, '🗑️ 删除所有工作流预设（自定义保存的预设）'),
+            h('li', null, '🗑️ 删除所有图库图片及记录（图片文件一并删除）'),
+            h('li', null, '🗑️ 重置 ComfyUI 连接配置（恢复默认端口 8188）'),
+            h('li', null, '🗑️ 清除所有生图配方（保存的参数组合）')
+          ),
+          h('p', { style: { color: 'var(--ant-color-error)', fontWeight: 700, marginTop: 16, fontSize: 14 } },
+            '⚠️ 以上所有数据将被永久删除，无法恢复！'),
+          h('p', { style: { color: 'var(--ant-color-text-secondary)', marginTop: 8 } },
+            '点击「我已知晓后果，继续」进入最终确认。')
+        ),
+
+        // ── 第二步最终确认弹窗 ──
+        h(Modal, {
+          title: '🔴 第二步：最终确认',
+          open: step2[0],
+          onOk: doRepair,
+          onCancel: function () { step2[1](false); },
+          confirmLoading: repairing[0],
+          okText: '确认修复，删除所有数据',
+          okButtonProps: { danger: true },
+          cancelText: '取消',
+          width: 520
+        },
+          h('p', { style: { fontSize: 14, fontWeight: 700, color: 'red' } },
+            '这是最后一次确认机会。'),
+          h('p', { style: { marginTop: 12 } },
+            '点击「确认修复，删除所有数据」后：'),
+          h('ul', { style: { lineHeight: 2 } },
+            h('li', null, '所有绑定、预设、图库、配方将立即删除'),
+            h('li', null, '图片文件将被彻底清除'),
+            h('li', null, '配置将恢复为默认值'),
+            h('li', null, '页面将在 3 秒后自动刷新')
+          ),
+          h('p', { style: { color: 'red', fontWeight: 700, marginTop: 16, fontSize: 14 } },
+            '🔴 此操作不可撤销！请确认你确实要删除所有数据。')
+        )
+      );
+    }
+    Q.route.add(pid, { id: pid + '.settings', path: '/image-gen-settings', component: RepairPanel });
     function MenuSwitch() {
       var checked = React.useState(isOn());
-      return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }, onClick: function(e){e.stopPropagation();e.preventDefault();} },
+      return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' } },
         h('span', null, '✨ 生图助手'),
-        h(Switch, { size: 'small', checked: checked[0], onChange: function(v,e){ if(e){e.stopPropagation();e.preventDefault();} checked[1](v); setOn(v); emitToggle(v); } })
+        h(Switch, { size: 'small', checked: checked[0], onClick: function(e){e.stopPropagation();e.preventDefault();}, onChange: function(v,e){ if(e){e.stopPropagation();e.preventDefault();} checked[1](v); setOn(v); emitToggle(v); } })
       );
     }
     Q.menu.add(pid, { id: pid + '.menu', label: h(MenuSwitch), route: pid + '.settings', location: 'primary.agentScoped', order: 66 });

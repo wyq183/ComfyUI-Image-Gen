@@ -1,5 +1,42 @@
 # Release Notes
 
+## v0.9.3
+
+- 修复图库切换分类时列表仍显示旧图片、响应卡顿的问题。
+- 图库列表与分类读取不再隐式扫描整个 ComfyUI output；仅点击「扫描 ComfyUI」时执行全盘扫描。
+- 切换分类时立即清空旧列表并显示加载状态；用请求序号防止旧请求的迟到响应覆盖新分类结果。
+
+## v0.9.2
+
+- 修复 ComfyUI PNG 元数据扫描只显示正向提示词的问题。
+- 按 KSampler 的 `positive` / `negative` 连线准确提取正向与反向提示词；重新扫描可补齐旧图片记录。
+
+## v0.9.1
+
+- 图库详情新增所属分类选择器，可将已有图片实际移动到 ComfyUI output 内对应分类文件夹。
+- 数据库同步更新图片分类、文件路径与文件名；目标重名时自动避免覆盖。
+- 新增「全部分类」视图。
+
+
+## v0.8.0
+
+- 新增调试追踪功能：后端记录最后一次生成的完整提示词，通过 `/debug/last-generation` 端点可查看
+- 新增前端调试面板：在「工作流参数」下方显示最后一次发送的提示词，方便排查提示词问题
+- 新增 ComfyUI 画布同步说明：明确告知用户插件通过 API 提交工作流，不会改变 ComfyUI 画布显示
+- 后端添加详细日志：记录发送到 ComfyUI 的提示词和反向提示词，便于调试
+- 所有改动同时更新到 package 目录，确保打包版本与源码一致
+
+## v0.5.0
+
+- 架构重构：新增 `backend/comfy_adapter.py`，插件后端负责确定性 ComfyUI 能力发现、模型分类、工作流构建与绑定校验，AI 降级为提示词和解释辅助。
+- `/image-gen/status` 改为完整资源扫描：返回 checkpoints、loras、vae、clip、text_encoders、unet、diffusion_models、controlnet、upscale_models，不再只截断前 50 个 checkpoint。
+- 采样器和调度器改从 ComfyUI `/object_info` 中读取真实节点选项，而不是仅依赖手写枚举。
+- 新增 Anima / Qwen UNet 工作流构建器：`UNETLoader + CLIPLoader(type=qwen_image) + VAELoader + KSampler`，默认 CFG 1.0、Euler/normal，LoRA 使用 `LoraLoaderModelOnly`。
+- 后端 `/workflows/bind` 新增校验：Anima/Flux/Nunchaku/GGUF 等非 checkpoint 模型不能被错误保存成 Illustrious/SDXL 工作流。
+- 新增 `/workflows/auto-bind`：用户选择模型后可一键自动适配工作流，减少“复制提示词让 AI 猜”的出错路径。
+- 前端入口升级到 `ui/index.0.5.0.js`，无工作流状态下新增“一键自动适配”按钮。
+- 新增 `docs-v0.5.0-architecture.md`，记录本次参考 SD Manager 后的职责边界和后续重构方向。
+
 ## v0.4.1
 
 - 修复 QwenPaw Desktop / Electron WebView 可能继续加载旧版前端缓存的问题。

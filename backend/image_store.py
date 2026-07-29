@@ -42,6 +42,7 @@ def init_db():
             negative_prompt TEXT DEFAULT '',
             model_name TEXT DEFAULT '',
             lora_name TEXT DEFAULT '',
+            category TEXT DEFAULT '未分类',
             workflow_id INTEGER DEFAULT 0,
             steps INTEGER DEFAULT 20,
             cfg REAL DEFAULT 7.0,
@@ -86,6 +87,10 @@ def init_db():
             value TEXT NOT NULL
         );
     """)
+    try:
+        conn.execute("ALTER TABLE gallery_images ADD COLUMN category TEXT DEFAULT '未分类'")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     # 默认配置
     defaults = {
@@ -251,14 +256,14 @@ def get_image(image_id: int) -> Optional[dict]:
 
 def add_image(file_path: str, file_name: str, file_size: int = 0, width: int = 0, height: int = 0,
               prompt: str = "", negative_prompt: str = "", model_name: str = "", lora_name: str = "",
-              workflow_id: int = 0, steps: int = 20, cfg: float = 7.0, seed: int = -1) -> dict:
+              workflow_id: int = 0, steps: int = 20, cfg: float = 7.0, seed: int = -1, category: str = '未分类') -> dict:
     conn = _get_db()
     cur = conn.execute(
         """INSERT INTO gallery_images (file_path,file_name,file_size,width,height,
-           prompt,negative_prompt,model_name,lora_name,workflow_id,steps,cfg,seed)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           prompt,negative_prompt,model_name,lora_name,category,workflow_id,steps,cfg,seed)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (file_path, file_name, file_size, width, height, prompt, negative_prompt,
-         model_name, lora_name, workflow_id, steps, cfg, seed)
+         model_name, lora_name, category, workflow_id, steps, cfg, seed)
     )
     conn.commit()
     row = conn.execute("SELECT * FROM gallery_images WHERE id=?", (cur.lastrowid,)).fetchone()
@@ -277,6 +282,23 @@ def update_rating(image_id: int, rating: int) -> dict:
 def update_notes(image_id: int, notes: str) -> dict:
     conn = _get_db()
     conn.execute("UPDATE gallery_images SET notes=? WHERE id=?", (notes, image_id))
+    conn.commit()
+    row = conn.execute("SELECT * FROM gallery_images WHERE id=?", (image_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+def update_image_location(image_id: int, file_path: str, file_name: str, category: str) -> dict:
+    conn = _get_db()
+    conn.execute("UPDATE gallery_images SET file_path=?, file_name=?, category=? WHERE id=?", (file_path, file_name, category, image_id))
+    conn.commit()
+    row = conn.execute("SELECT * FROM gallery_images WHERE id=?", (image_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+def update_image_metadata(image_id: int, prompt: str = '', negative_prompt: str = '', model_name: str = '', lora_name: str = '', steps: int = 20, cfg: float = 7.0, seed: int = -1) -> dict:
+    conn = _get_db()
+    conn.execute("""UPDATE gallery_images SET prompt=?, negative_prompt=?, model_name=?, lora_name=?, steps=?, cfg=?, seed=? WHERE id=?""",
+                 (prompt, negative_prompt, model_name, lora_name, steps, cfg, seed, image_id))
     conn.commit()
     row = conn.execute("SELECT * FROM gallery_images WHERE id=?", (image_id,)).fetchone()
     conn.close()
