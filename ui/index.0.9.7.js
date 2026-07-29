@@ -111,7 +111,7 @@
 
   function GenPanel() {
     var s = React.useState;
-    var state = s(null), model = s(''), tab = s('gen'), task = s(null), review = s(null), settingsTick = s(0), upscaleFile = s(null), upscaleProfile = s('anime_6b'), upscaleCategory = s('未分类'), upscaleProfiles = s([]), imgs = s([]), preview = s(null), busy = s(false), scanning = s(false), galleryLoading = s(false), category = s('未分类'), categories = s(['未分类']), batchMode = s(false), selectedIds = s([]), batchBusy = s(false), gallerySort = s('newest'), galleryModel = s(''), galleryLora = s(''), galleryMinRating = s(0);
+    var state = s(null), model = s(''), tab = s('gen'), imgs = s([]), preview = s(null), busy = s(false), scanning = s(false), galleryLoading = s(false), category = s('未分类'), categories = s(['未分类']), batchMode = s(false), selectedIds = s([]), batchBusy = s(false), gallerySort = s('newest'), galleryModel = s(''), galleryLora = s(''), galleryMinRating = s(0);
     var galleryRequest = React.useRef(0);
     var scanFailed = s(false);  // 扫描失败时置 true，让「复制 AI 提示词」按钮切换为找 ComfyUI 的提示词
     var versionMismatch = s('');
@@ -182,12 +182,11 @@
         .then(function () { batchBusy[1](false); });
     }
     function loadCategories() { req('/gallery/categories?_=' + Date.now()).then(function (d) { categories[1](d.categories || ['未分类']); }).catch(function () {}); }
-    function scanGallery() { galleryLoading[1](true); req('/gallery/scan', { method: 'POST' }).then(function (d) { message.success(d.message || ('已扫描 ' + (d.added || 0) + ' 张图片')); loadCategories(); loadImages(); }).catch(function (e) { galleryLoading[1](false); message.error(e.message); }); }
+    function scanGallery() { galleryLoading[1](true); req('/gallery/scan', { method: 'POST' }).then(function (d) { message.success('已扫描 ' + (d.added || 0) + ' 张图片'); loadCategories(); loadImages(); }).catch(function (e) { galleryLoading[1](false); message.error(e.message); }); }
     React.useEffect(function () {
       load();
       loadCategories();
       loadImages();
-      req('/upscale/profiles?_=' + Date.now()).then(function(d){ var items=d.items || []; upscaleProfiles[1](items); if(items.length) upscaleProfile[1](items[0].id); }).catch(function(){});
       req('/version?_=' + Date.now()).then(function (v) {
         if (v && v.version && FRONTEND_VERSION && v.version !== FRONTEND_VERSION) {
           var msg = '版本不一致：前端 v' + FRONTEND_VERSION + ' / 后端 v' + v.version + '。请完全退出并重启 QwenPaw Desktop。';
@@ -305,45 +304,24 @@
         message.info('当前环境不支持自动复制，请手动复制提示词到主聊天框发送。');
       }
     }
-    function setting(key, fallback) { var raw = localStorage.getItem(pid + '-setting-' + key); return raw === null ? fallback : raw; }
-    function setSetting(key, value) { localStorage.setItem(pid + '-setting-' + key, String(value)); settingsTick[1](settingsTick[0] + 1); }
-    function openReview(ids) { if (ids && ids.length) { review[1]({ ids: ids, index: Math.max(0, ids.length - 1) }); tab[1]('gallery'); loadImages(); } }
-    function reviewPolicyAllows(total) { var policy = setting('review_policy', 'single'); return policy === 'always' || (policy === 'single' && total === 1) || (policy === 'batch' && total > 1); }
-    function pollTask(taskId) {
-      req('/tasks/' + taskId + '?_=' + Date.now()).then(function (t) {
-        task[1](t); if (t.gallery_ids && t.gallery_ids.length) loadImages();
-        if (t.state === 'queued' || t.state === 'running') { window.setTimeout(function(){ pollTask(taskId); }, 1200); return; }
-        busy[1](false); loadImages();
-        if (t.state === 'completed') { message.success(t.message); if (reviewPolicyAllows(t.total)) openReview(t.gallery_ids || []); }
-        else if (t.state === 'cancelled') message.info(t.message || '已停止等待');
-        else message.error((t.failures && t.failures[0]) || t.message || '生图失败');
-      }).catch(function(e) { busy[1](false); message.error(e.message || '读取生成进度失败'); });
-    }
-    function bringImageToEditor(img, variant) {
-      if (!img) return; model[1](img.model_name || model[0]); prompt[1](img.prompt || ''); neg[1](img.negative_prompt || '');
-      params[1](Object.assign({}, params[0], { steps: img.steps || 20, cfg: img.cfg || 7, width: img.width || 1024, height: img.height || 1024, seed: variant ? -1 : (img.seed === undefined ? -1 : img.seed) }));
-      var parsed = loraLines(img.lora_name).map(function(line) { var m = line.match(/^(.*?) \(模型强度 ([^,]+), CLIP强度 ([^)]+)\)$/); return m ? { name:m[1], enabled:true, strength_model:Number(m[2]), strength_clip:Number(m[3]) } : null; }).filter(Boolean); if (parsed.length) loras[1](parsed);
-      preview[1](null); review[1](null); tab[1]('gen'); message.success(variant ? '已带入参数并随机 Seed，可继续生成变体' : '已带入原图全部参数，可复刻生成');
-    }
-
-    function pollUpscaleTask(taskId) {
-      req('/tasks/' + taskId + '?_=' + Date.now()).then(function(t){ task[1](t); if(t.state === 'queued' || t.state === 'running'){ window.setTimeout(function(){pollUpscaleTask(taskId);}, 1000); return; } loadImages(); if(t.state === 'completed'){ message.success('放大完成，已保存到图库'); tab[1]('gallery'); if(reviewPolicyAllows(1)) openReview(t.gallery_ids || []); } else message.error((t.failures&&t.failures[0]) || t.message || '放大失败'); }).catch(function(e){message.error(e.message || '读取放大进度失败');});
-    }
-    function doUpscaleUpload() {
-      if(!upscaleFile[0]) return message.warning('先选择一张图片'); var fd=new FormData(); fd.append('image',upscaleFile[0]);
-      req('/upscale/upload?profile='+encodeURIComponent(upscaleProfile[0])+'&category='+encodeURIComponent(upscaleCategory[0]), {method:'POST',body:fd}).then(function(r){ task[1]({id:r.task_id,kind:'upscale',state:'queued',total:1,completed:0,message:'放大任务已提交'}); pollUpscaleTask(r.task_id); }).catch(function(e){message.error(e.message || '提交放大失败');});
-    }
-    function upscaleGalleryImage(img) {
-      if(!img) return; req('/upscale/gallery/'+img.id+'?profile='+encodeURIComponent(upscaleProfile[0])+'&category='+encodeURIComponent(img.category || upscaleCategory[0]), {method:'POST'}).then(function(r){ preview[1](null); task[1]({id:r.task_id,kind:'upscale',state:'queued',total:1,completed:0,message:'放大任务已提交'}); pollUpscaleTask(r.task_id); }).catch(function(e){message.error(e.message || '提交放大失败');});
-    }
-
     function doGen() {
       if (!state[0] || !state[0].has_workflow) return message.warning('请先绑定工作流');
       if (!prompt[0].trim()) return message.warning('先写提示词～');
       if (prompt[0].length > 2000) return message.warning('提示词太长了，最多2000字符');
       if (neg[0].length > 1000) return message.warning('负向提示词太长了，最多1000字符');
-      busy[1](true); var p = Object.assign({}, params[0]);
-      req('/generate/async', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ prompt:prompt[0], negative_prompt:neg[0], model_name:model[0], steps:p.steps||20, cfg:p.cfg||7, seed:p.seed === undefined ? -1 : p.seed, width:p.width||1024, height:p.height||1024, batch_size:p.batch_size||1, category:category[0], sampler_name:p.sampler_name||'euler', scheduler:p.scheduler||'normal', denoise:p.denoise === undefined ? 1 : p.denoise, loras:loras[0].filter(function(x){ return x.enabled && x.name; }) }) }).then(function(r){ task[1]({id:r.task_id,state:'queued',total:r.total,completed:0,message:'任务已提交'}); pollTask(r.task_id); }).catch(function(e){ busy[1](false); message.error(e.message); });
+      busy[1](true);
+      var p = Object.assign({}, params[0]);
+      req('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        prompt: prompt[0], negative_prompt: neg[0], model_name: model[0],
+        steps: p.steps || 20, cfg: p.cfg || 7, seed: p.seed === undefined ? -1 : p.seed,
+        width: p.width || 1024, height: p.height || 1024, batch_size: p.batch_size || 1, category: category[0],
+        sampler_name: p.sampler_name || 'euler', scheduler: p.scheduler || 'normal', denoise: p.denoise === undefined ? 1 : p.denoise,
+        loras: loras[0].filter(function (x) { return x.enabled && x.name; })
+      }) }).then(function (r) {
+        busy[1](false);
+        if (r.success) { message.success('生图成功'); loadImages(); preview[1](r.gallery_id); tab[1]('gallery'); }
+        else message.error(r.error || '生图失败');
+      }).catch(function (e) { busy[1](false); message.error(e.message); });
     }
 
     var d = state[0] || {};
@@ -355,24 +333,17 @@
 
     return h(React.Fragment, null,
       h('div', { style: { padding: '10px 12px', borderBottom: '1px solid var(--border-color-split)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
-        h('div', null, h('div', { style: { fontWeight: 700 } }, '✨ ComfyUI 生图助手'), h('div', { style: { fontSize: 10, color: 'var(--ant-color-text-secondary)' } }, '确定性适配面板 · v' + FRONTEND_VERSION)),
+        h('div', null, h('div', { style: { fontWeight: 700 } }, '✨ 生图助手'), h('div', { style: { fontSize: 10, color: 'var(--ant-color-text-secondary)' } }, '确定性适配面板 · v' + FRONTEND_VERSION)),
         h('div', { style: { display: 'flex', gap: 4 } },
-          h(Button, { type: 'text', size: 'small', icon: I && I.ReloadOutlined ? h(I.ReloadOutlined) : null, onClick: function () { message.loading('正在刷新扫描...'); load(model[0], workflowPreset[0]); req('/upscale/profiles?_=' + Date.now()).then(function(d){ var items=d.items || []; upscaleProfiles[1](items); if(items.length) upscaleProfile[1](items[0].id); }); }, title: '刷新 ComfyUI 资源' }, '刷新'),
+          h(Button, { type: 'text', size: 'small', icon: I && I.ReloadOutlined ? h(I.ReloadOutlined) : null, onClick: function () { message.loading('正在刷新扫描...'); load(model[0], workflowPreset[0]); }, title: '刷新模型/采样器/调度器' }, '刷新'),
           h(Button, { type: 'text', size: 'small', icon: I && I.CloseOutlined ? h(I.CloseOutlined) : null, onClick: function () { setOn(false); emitToggle(false); toggleUI(false); } })
         )
       ),
       h('div', { style: { display: 'flex', borderBottom: '1px solid var(--border-color-split)' } },
         h(Button, { type: tab[0] === 'gen' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('gen'); } }, '工作流'),
-        h(Button, { type: tab[0] === 'gallery' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('gallery'); loadCategories(); loadImages(); } }, '图库(' + (imgs[0] || []).length + ')'),
-        h(Button, { type: tab[0] === 'upscale' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('upscale'); } }, '放大'),
-        h(Button, { type: tab[0] === 'settings' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('settings'); } }, '设置')
+        h(Button, { type: tab[0] === 'gallery' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('gallery'); loadCategories(); loadImages(); } }, '图库(' + (imgs[0] || []).length + ')')
       ),
       versionMismatch[0] ? h(Alert, { type: 'warning', showIcon: true, message: '缓存版本不一致', description: versionMismatch[0], style: { margin: 10 } }) : null,
-      task[0] && (task[0].state === 'queued' || task[0].state === 'running') ? h('div', { style:{margin:8,padding:10,border:'1px solid var(--ant-color-primary)',borderRadius:7,background:'var(--ant-color-fill-quaternary)'} },
-        h('div',{style:{fontWeight:700,fontSize:12}}, (task[0].kind === 'upscale' ? '图片放大 · ' : '生成任务 · ') + (task[0].message || '正在处理中')),
-        h('div',{style:{height:6,background:'var(--ant-color-fill-secondary)',borderRadius:4,overflow:'hidden',margin:'8px 0'}},h('div',{style:{height:'100%',width:Math.round((Number(task[0].completed||0)/Math.max(1,Number(task[0].total||1)))*100)+'%',background:'var(--ant-color-primary)',transition:'width .25s'}})),
-        h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--ant-color-text-secondary)'}},h('span',null,'已完成 '+(task[0].completed||0)+' / '+(task[0].total||1)+' 张'),h(Button,{size:'small',danger:true,onClick:function(){req('/tasks/'+task[0].id+'/stop',{method:'POST'}).then(function(){message.info('将在当前图片结束后停止');});}},'停止等待'))
-      ) : null,
       tab[0] === 'gen' ? h('div', { style: { flex: 1, overflowY: 'auto' } },
         h(Section, { title: '1. 主模型', extra: h(Tag, { color: status.connected ? 'green' : 'red' }, status.connected ? 'ComfyUI 已连' : '未连接') },
           h(Select, { size: 'small', value: model[0] || undefined, placeholder: '选择主模型', style: { width: '100%' },
@@ -445,32 +416,6 @@
           )
         )
       ) : null,
-      tab[0] === 'upscale' ? h('div',{style:{flex:1,overflowY:'auto'}},
-        h(Section,{title:'图片放大'},
-          h(Alert,{type:upscaleProfiles[0].length?'info':'warning',showIcon:true,message:upscaleProfiles[0].length?'已自动读取当前 ComfyUI 的放大模型':'当前 ComfyUI 未检测到放大模型',description:upscaleProfiles[0].length?'模型列表来自 UpscaleModelLoader；放大结果将自动保存到图库。':'请在 ComfyUI 安装任意放大模型后点击右上角「刷新」。常见目录为 models/upscale_models。',style:{marginBottom:10}}),
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:4}},'选择图片'),
-          h('input',{type:'file',accept:'.png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp',onChange:function(e){upscaleFile[1](e.target.files && e.target.files[0] || null);},style:{width:'100%',fontSize:12,marginBottom:6}}),
-          upscaleFile[0] ? h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:10}},'已选择：'+upscaleFile[0].name) : h('div',{style:{fontSize:11,color:'var(--ant-color-text-tertiary)',marginBottom:10}},'也可以在图库图片详情中直接点「放大这张」'),
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:4}},'放大流程'),
-          h(Select,{size:'small',value:upscaleProfile[0],style:{width:'100%',marginBottom:10},onChange:function(v){upscaleProfile[1](v);},options:upscaleProfiles[0].map(function(x){return {value:x.id,label:x.label + ' · ' + (x.recommendation || '')};})}),
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:4}},'保存分类'),
-          h(Select,{size:'small',value:upscaleCategory[0],style:{width:'100%',marginBottom:12},onChange:function(v){upscaleCategory[1](v);},options:categories[0].map(function(x){return {value:x,label:x};})}),
-          h(Button,{type:'primary',block:true,onClick:doUpscaleUpload,disabled:!upscaleFile[0] || !upscaleProfiles[0].length},'开始放大')
-        ),
-        h(Section,{title:'自动适配说明'},h('div',{style:{fontSize:12,lineHeight:'21px',color:'var(--ant-color-text-secondary)'}},'插件不内置也不下载模型；它会读取你当前 ComfyUI 已安装的放大模型。名称中带 anime 的模型会标为二次元推荐，常见 ESRGAN / x4plus 类模型标为通用推荐，其余模型也可手动选择。'))
-      ) : null,
-      tab[0] === 'settings' ? h('div',{style:{flex:1,overflowY:'auto'}},
-        h(Section,{title:'生成完成与审阅'},
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:5}},'生成完成后自动打开结果面板'),
-          h(Select,{size:'small',value:setting('review_policy','single'),style:{width:'100%',marginBottom:10},onChange:function(v){setSetting('review_policy',v);},options:[{value:'always',label:'始终自动审阅'},{value:'single',label:'仅单张生成时审阅（推荐）'},{value:'batch',label:'仅批量生成时审阅'},{value:'never',label:'从不自动弹出'}]}),
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:5}},'批量审阅最多显示'),
-          h(Select,{size:'small',value:Number(setting('review_limit','4')),style:{width:'100%'},onChange:function(v){setSetting('review_limit',v);},options:[{value:1,label:'1 张'},{value:2,label:'2 张'},{value:4,label:'4 张（推荐）'},{value:9,label:'9 张'},{value:99,label:'全部'}]})
-        ),
-        h(Section,{title:'生成中'},
-          h('div',{style:{fontSize:12,lineHeight:'20px',color:'var(--ant-color-text-secondary)'}},'批量生成会按单张依次提交，因此可实时看到「已完成 / 总数」，已完成图片会自动进入图库。停止等待不会中断 ComfyUI 正在跑的当前一张。')
-        ),
-        h(Section,{title:'当前体验'},h('div',{style:{fontSize:12,lineHeight:'20px',color:'var(--ant-color-text-secondary)'}},'好图可在详情页一键复刻或生成变体；原模型、提示词、尺寸、LoRA 和采样参数会带回工作流。'))
-      ) : null,
       tab[0] === 'gallery' ? h(React.Fragment, null,
         h('div', { style: { padding: 8, display: 'flex', gap: 6, borderBottom: '1px solid var(--border-color-split)' } },
           h(Select, { size: 'small', value: category[0], style: { flex: 1 }, options: [{ value: '', label: '全部分类' }].concat(categories[0].map(function (x) { return { value: x, label: x }; })), disabled: galleryLoading[0] || batchMode[0], onChange: switchCategory }),
@@ -478,18 +423,16 @@
           h(Button, { size: 'small', onClick: function () { var n = window.prompt('新建分类名称'); if (!n || !n.trim()) return; req('/gallery/categories/create?name=' + encodeURIComponent(n.trim()), { method: 'POST' }).then(function () { loadCategories(); switchCategory(n.trim()); }).catch(function (e) { message.error(e.message); }); }, disabled: batchMode[0] }, '+ 分类'),
           h(Button, { size: 'small', type: batchMode[0] ? 'primary' : 'default', onClick: function () { batchMode[0] ? exitBatchMode() : batchMode[1](true); } }, batchMode[0] ? '取消' : '批量')
         ),
-        h('div', { style: { padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, overflow: 'hidden', borderBottom: '1px solid var(--border-color-split)', background: 'var(--ant-color-fill-quaternary)' } },
-          h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, .82fr)', gap: 6, minWidth: 0 } },
-            h(Select, { size: 'small', value: gallerySort[0], style: { width: '100%', minWidth: 0 }, options: [
-              { value: 'newest', label: '排序：最新优先' }, { value: 'oldest', label: '排序：最早优先' },
-              { value: 'rating_desc', label: '排序：星级高→低' }, { value: 'rating_asc', label: '排序：星级低→高' },
-              { value: 'size_desc', label: '排序：文件大→小' }, { value: 'size_asc', label: '排序：文件小→大' },
-              { value: 'model', label: '排序：模型名称' }, { value: 'lora', label: '排序：LoRA 名称' }
-            ], onChange: function (v) { gallerySort[1](v); selectedIds[1]([]); }, disabled: batchMode[0] }),
-            h(Select, { size: 'small', value: galleryMinRating[0], style: { width: '100%', minWidth: 0 }, options: [{ value: 0, label: '星级：全部' }, { value: 1, label: '星级：≥ 1 星' }, { value: 2, label: '星级：≥ 2 星' }, { value: 3, label: '星级：≥ 3 星' }, { value: 4, label: '星级：≥ 4 星' }, { value: 5, label: '星级：5 星' }], onChange: function (v) { galleryMinRating[1](v); selectedIds[1]([]); }, disabled: batchMode[0] })
-          ),
-          h(Select, { size: 'small', allowClear: true, showSearch: true, optionFilterProp: 'label', placeholder: '筛选模型（可搜索）', value: galleryModel[0] || undefined, style: { width: '100%', minWidth: 0 }, options: Array.from(new Set((imgs[0] || []).map(function (x) { return x.model_name; }).filter(Boolean))).sort().map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryModel[1](v || ''); selectedIds[1]([]); }, disabled: batchMode[0] }),
-          h(Select, { size: 'small', allowClear: true, showSearch: true, optionFilterProp: 'label', placeholder: '筛选 LoRA（可搜索）', value: galleryLora[0] || undefined, style: { width: '100%', minWidth: 0 }, options: Array.from(new Set([].concat.apply([], (imgs[0] || []).map(function (x) { return loraLines(x.lora_name); })))).sort().map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryLora[1](v || ''); selectedIds[1]([]); }, disabled: batchMode[0] })
+        h('div', { style: { padding: '6px 8px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, borderBottom: '1px solid var(--border-color-split)', background: 'var(--ant-color-fill-quaternary)' } },
+          h(Select, { size: 'small', value: gallerySort[0], options: [
+            { value: 'newest', label: '排序：最新优先' }, { value: 'oldest', label: '排序：最早优先' },
+            { value: 'rating_desc', label: '排序：星级高→低' }, { value: 'rating_asc', label: '排序：星级低→高' },
+            { value: 'size_desc', label: '排序：文件大→小' }, { value: 'size_asc', label: '排序：文件小→大' },
+            { value: 'model', label: '排序：模型名称' }, { value: 'lora', label: '排序：LoRA 名称' }
+          ], onChange: function (v) { gallerySort[1](v); selectedIds[1]([]); }, disabled: batchMode[0] }),
+          h(Select, { size: 'small', value: galleryMinRating[0], options: [{ value: 0, label: '星级：全部' }, { value: 1, label: '星级：≥ 1 星' }, { value: 2, label: '星级：≥ 2 星' }, { value: 3, label: '星级：≥ 3 星' }, { value: 4, label: '星级：≥ 4 星' }, { value: 5, label: '星级：5 星' }], onChange: function (v) { galleryMinRating[1](v); selectedIds[1]([]); }, disabled: batchMode[0] }),
+          h(Select, { size: 'small', allowClear: true, placeholder: '筛选模型', value: galleryModel[0] || undefined, options: Array.from(new Set((imgs[0] || []).map(function (x) { return x.model_name; }).filter(Boolean))).sort().map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryModel[1](v || ''); selectedIds[1]([]); }, disabled: batchMode[0] }),
+          h(Select, { size: 'small', allowClear: true, placeholder: '筛选 LoRA', value: galleryLora[0] || undefined, options: Array.from(new Set([].concat.apply([], (imgs[0] || []).map(function (x) { return loraLines(x.lora_name); })))).sort().map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryLora[1](v || ''); selectedIds[1]([]); }, disabled: batchMode[0] })
         ),
         batchMode[0] ? h('div', { style: { padding: '6px 8px', display: 'flex', gap: 6, alignItems: 'center', borderBottom: '1px solid var(--border-color-split)', background: 'var(--ant-color-fill-quaternary)' } },
           h('span', { style: { fontSize: 12, whiteSpace: 'nowrap' } }, '已选 ' + selectedIds[0].length + ' 张'),
@@ -507,11 +450,6 @@
           }) : h('div', { style: { gridColumn: '1/-1', paddingTop: 40 } }, h(Empty, { description: (imgs[0] || []).length ? '没有符合当前筛选条件的图片' : '还没有图片' }))
         )
       ) : null,
-      review[0] ? (function(){ var ids=(review[0].ids||[]).slice(-(Number(setting('review_limit','4'))||4)); var all=review[0].ids||[]; var currentId=ids[ids.length-1]; return h(Modal,{open:true,width:720,footer:null,title:'本次生成结果 · '+all.length+' 张',onCancel:function(){review[1](null);}},
-        all.length>ids.length ? h(Alert,{type:'info',showIcon:true,message:'本次共生成 '+all.length+' 张，当前展示 '+ids.length+' 张',style:{marginBottom:10}}) : null,
-        h('div',{style:{display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:8}},ids.map(function(id,i){var im=(imgs[0]||[]).find(function(x){return x.id===id;}); return im ? h('div',{key:id,onClick:function(){review[1]({ids:all,index:i});},style:{cursor:'pointer',border:currentId===id?'2px solid var(--ant-color-primary)':'1px solid var(--border-color-split)',borderRadius:6,overflow:'hidden'}},h('img',{src:iurl(id),style:{width:'100%',display:'block',aspectRatio:'1/1',objectFit:'cover'}})) : null;})),
-        h('div',{style:{display:'flex',gap:6,marginTop:12}},h(Button,{block:true,onClick:function(){review[1](null);tab[1]('gallery');}},'在图库查看本次全部'),h(Button,{type:'primary',block:true,onClick:function(){var im=(imgs[0]||[]).find(function(x){return x.id===currentId;}); if(im) bringImageToEditor(im,true);}},'对当前图生成变体'))
-      ); })() : null,
       preview[0] ? (function () { var img = (imgs[0] || []).find(function (x) { return x.id === preview[0]; }); if (!img) return null;
         function copyText(t) { if (!t) return; if (navigator.clipboard) { navigator.clipboard.writeText(t).then(function () { message.success('已复制'); }) .catch(function () { message.info(t); }); } else { message.info(t); } }
         function InfoRow(label, value, copyable) {
@@ -541,7 +479,7 @@
           h('img', { src: iurl(img.id), style: { width: '100%', borderRadius: 8, marginBottom: 12 } }),
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
             h(Rate, { value: img.rating || 0, onChange: function (v) { req('/images/' + img.id + '/rating', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: v }) }).then(function () { loadImages(category[0]); }).catch(function (e) { message.error(e.message || '评分保存失败'); }); } }),
-            h('div',{style:{display:'flex',gap:4,flexWrap:'wrap',justifyContent:'flex-end'}},h(Button, { size: 'small', onClick: function () { bringImageToEditor(img, false); } }, '复刻这张'),h(Button, { size: 'small', onClick: function () { bringImageToEditor(img, true); } }, '生成变体'),h(Button, { size: 'small', onClick: function () { upscaleGalleryImage(img); } }, '放大这张'),h(Button, { size: 'small', onClick: function () { copyText(recipeText); } }, '复制参数'))
+            h(Button, { size: 'small', onClick: function () { copyText(recipeText); } }, '复制全部参数')
           ),
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 10 } },
             h('span', { style: { fontSize: 11, color: 'var(--ant-color-text-secondary)' } }, '所属分类'),
@@ -584,12 +522,11 @@
       '#' + pid + '-btn{position:fixed;right:0;top:50%;z-index:999;transform:translateY(-50%);width:22px;height:50px;border:none;background:var(--ant-primary-color,#8EA7FF);color:#fff;border-radius:4px 0 0 4px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;transition:right .3s;box-shadow:-2px 0 8px rgba(0,0,0,.1)}',
       '#' + pid + '-btn.open{right:360px}',
       '#' + pid + '-panel{position:fixed;top:0;right:0;width:360px;height:100vh;z-index:998;background:var(--ant-color-bg-container,#fff);border-left:1px solid var(--border-color-split,#e8e8e8);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .3s;box-shadow:-4px 0 20px rgba(0,0,0,.08)}',
-      '#' + pid + '-panel .ant-select{min-width:0!important;max-width:100%!important}#' + pid + '-panel .ant-select-selector{min-width:0!important;overflow:hidden!important}#' + pid + '-panel .ant-select-selection-item,#' + pid + '-panel .ant-select-selection-placeholder{min-width:0!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important}',
       '#' + pid + '-panel.open{transform:translateX(0)}'
     ].join('\n');
     document.head.appendChild(style);
     var btn = document.createElement('button');
-    btn.id = pid + '-btn'; btn.textContent = '✨'; btn.title = 'ComfyUI 生图助手'; btn.style.display = isOn() ? '' : 'none';
+    btn.id = pid + '-btn'; btn.textContent = '✨'; btn.title = '生图助手'; btn.style.display = isOn() ? '' : 'none';
     var panel = document.createElement('div'); panel.id = pid + '-panel';
     document.body.appendChild(btn); document.body.appendChild(panel);
     btn.onclick = function () {
@@ -705,7 +642,7 @@
     function MenuSwitch() {
       var checked = React.useState(isOn());
       return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' } },
-        h('span', null, '✨ ComfyUI 生图助手'),
+        h('span', null, '✨ 生图助手'),
         h(Switch, { size: 'small', checked: checked[0], onClick: function(e){e.stopPropagation();e.preventDefault();}, onChange: function(v,e){ if(e){e.stopPropagation();e.preventDefault();} checked[1](v); setOn(v); emitToggle(v); } })
       );
     }

@@ -97,6 +97,7 @@ def init_db():
         "comfyui_api_url": "http://127.0.0.1:8188",
         "comfyui_api_url_alt": "http://127.0.0.1:8189",
         "output_dir": str(IMAGES_DIR),
+        "comfyui_output_dir": "",
     }
     for k, v in defaults.items():
         conn.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", (k, v))

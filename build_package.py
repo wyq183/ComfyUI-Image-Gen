@@ -34,19 +34,17 @@ for ui_file in sorted((root / "ui").glob("*.js")):
 
 manifest = json.loads((root / "plugin.json").read_text(encoding="utf-8"))
 
-# 清理旧版前端文件：只保留 index.js 和 index.{当前版本}.js
+# 保留 plugin.json 声明的版本化前端入口。公开版本可以保持不变，
+# 但每次修复仍可变更资源名以绕开桌面端 WebView 缓存。
 _version = manifest.get("version", "0.0.0")
+_actual_frontend = manifest.get("entry", {}).get("frontend", f"ui/index.{_version}.js")
+_entry_name = Path(_actual_frontend).name
+if not (root / "ui" / _entry_name).is_file():
+    raise RuntimeError(f"plugin.json 前端入口不存在: {_actual_frontend}")
 for f in (package / "ui").glob("index.*.js"):
-    if f.name != f"index.{_version}.js":
+    if f.name != _entry_name:
         f.unlink()
         print(f"[build] 清理旧前端: {f.name}")
-
-# 自动同步 frontend 入口：确保 entry.frontend 指向 index.{version}.js
-_expected_frontend = f"ui/index.{_version}.js"
-_actual_frontend = manifest.get("entry", {}).get("frontend", "")
-if _actual_frontend != _expected_frontend:
-    print(f"[build] ⚠️ 修正 frontend 入口: {_actual_frontend} → {_expected_frontend}")
-    manifest["entry"]["frontend"] = _expected_frontend
 
 (package / "plugin.json").write_text(
     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
