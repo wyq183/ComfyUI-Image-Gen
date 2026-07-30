@@ -895,9 +895,11 @@ def _run_upscale_batch_task(task_id: str, sources: list[dict], profile: str) -> 
         try:
             image_name=_upload_input_to_comfy(Path(item["path"]).read_bytes(), item["name"])
             _run_upscale_task(task_id,image_name,profile,item["category"],item["source"])
+            # 单张放大函数会把任务标记为 completed；批量任务必须恢复为 running，避免前端在中途误显示完成。
             with _generation_tasks_lock:
                 t=_generation_tasks.get(task_id,{})
-                if t.get("state")=="failed": t["state"]="running"
+                if t.get("state") != "failed":
+                    t.update({"state":"running", "message":f"已完成 {t.get('completed',0)} / {len(sources)} 张，准备下一张"})
         except Exception as exc:
             with _generation_tasks_lock:
                 t=_generation_tasks.get(task_id)
