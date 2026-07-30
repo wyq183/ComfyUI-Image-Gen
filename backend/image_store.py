@@ -87,6 +87,10 @@ def init_db():
             value TEXT NOT NULL
         );
     """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_active_created ON gallery_images(deleted, created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_category ON gallery_images(deleted, category, created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_model ON gallery_images(deleted, model_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_path ON gallery_images(file_path)")
     try:
         conn.execute("ALTER TABLE gallery_images ADD COLUMN category TEXT DEFAULT '未分类'")
     except sqlite3.OperationalError:
@@ -248,6 +252,25 @@ def list_images(query: str = "", model_name: str = "", min_rating: int = 0, incl
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def list_images_page(query: str = "", model_name: str = "", lora_name: str = "", min_rating: int = 0, category: str = "", sort: str = "newest", limit: int = 60, offset: int = 0) -> tuple[list[dict], int]:
+    """分页读取图库；绝不把超大图库一次性放进内存。"""
+    limit = max(1, min(int(limit or 60), 200)); offset = max(0, int(offset or 0))
+    conn = _get_db(); where=["deleted=0"]; args=[]
+    if query: where.append("(prompt LIKE ? OR file_name LIKE ? OR notes LIKE ? OR model_name LIKE ? OR lora_name LIKE ?)"); args += [f"%{query}%"]*5
+    if model_name: where.append("model_name=?"); args.append(model_name)
+    if lora_name: where.append("lora_name LIKE ?"); args.append(f"%{lora_name}%")
+    if category: where.append("category=?"); args.append(category)
+    if min_rating: where.append("rating>=?"); args.append(int(min_rating))
+    order={"oldest":"created_at ASC", "rating_desc":"rating DESC, created_at DESC", "rating_asc":"rating ASC, created_at DESC", "size_desc":"file_size DESC", "size_asc":"file_size ASC", "model":"model_name COLLATE NOCASE ASC, created_at DESC", "lora":"lora_name COLLATE NOCASE ASC, created_at DESC"}.get(sort,"created_at DESC")
+    clause=" AND ".join(where)
+    total=int(conn.execute(f"SELECT COUNT(*) AS n FROM gallery_images WHERE {clause}",args).fetchone()["n"])
+    rows=conn.execute(f"SELECT id,file_path,file_name,file_size,width,height,prompt,negative_prompt,model_name,lora_name,category,workflow_id,steps,cfg,seed,rating,notes,created_at,generated_at FROM gallery_images WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",args+[limit,offset]).fetchall()
+    conn.close(); return [dict(x) for x in rows], total
+
+def list_gallery_categories() -> list[str]:
+    conn=_get_db(); rows=conn.execute("SELECT DISTINCT category FROM gallery_images WHERE deleted=0 AND category<>'' ORDER BY category COLLATE NOCASE").fetchall(); conn.close()
+    return [str(x["category"]) for x in rows]
 
 def get_image(image_id: int) -> Optional[dict]:
     conn = _get_db()

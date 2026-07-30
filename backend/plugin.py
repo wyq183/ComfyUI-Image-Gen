@@ -19,7 +19,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from qwenpaw.plugins.api import PluginApi
 from image_store import (
-    list_images, get_image, add_image, update_rating, update_notes, update_image_location, update_image_metadata, delete_image,
+    list_images, list_images_page, list_gallery_categories, get_image, add_image, update_rating, update_notes, update_image_location, update_image_metadata, delete_image,
     list_presets, get_preset, add_preset, save_workflow_preset,
     save_recipe, list_recipes,
     get_config, set_config,
@@ -615,7 +615,10 @@ def _run_upscale_task(task_id: str, image_name: str, profile: str, category: str
         for img_data in all_images:
             img=add_image(file_path=img_data["image_path"], file_name=img_data["file_name"], file_size=img_data.get("file_size",0), width=img_data.get("width",0), height=img_data.get("height",0), prompt=source.get("prompt", ""), negative_prompt=source.get("negative_prompt", ""), model_name="放大 · " + label, lora_name=source.get("lora_name", ""), category=_safe_category(category), steps=source.get("steps",20), cfg=source.get("cfg",7.0), seed=source.get("seed",-1)); ids.append(img["id"])
         with _generation_tasks_lock:
-            if task_id in _generation_tasks: _generation_tasks[task_id].update({"state":"completed", "completed":len(ids), "gallery_ids":ids, "message":"放大完成，已保存到图库", "finished_at":time.time()})
+            if task_id in _generation_tasks:
+                t = _generation_tasks[task_id]
+                all_ids = list(t.get("gallery_ids", [])) + ids
+                t.update({"state":"completed", "completed":int(t.get("completed", 0)) + len(ids), "gallery_ids":all_ids, "message":"放大完成，已保存到图库", "finished_at":time.time()})
     except Exception as exc:
         with _generation_tasks_lock:
             if task_id in _generation_tasks: _generation_tasks[task_id].update({"state":"failed", "failed":1, "failures":[str(exc)], "message":"放大失败"})
@@ -861,6 +864,48 @@ def api_upscale_gallery_image(image_id: int, profile: str = Query("anime_6b"), c
     image_name=_upload_input_to_comfy(path.read_bytes(), path.name)
     return _start_upscale(image_name, profile, category or img.get("category", "未分类"), img)
 
+@router.post("/upscale/gallery/batch")
+def api_upscale_gallery_batch(payload: BatchImagesRequest, profile: str = Query(""), category: str = Query("")):
+    ids=list(dict.fromkeys(payload.image_ids))
+    if not ids: raise HTTPException(400,"请至少选择一张图库图片")
+    if len(ids)>50: raise HTTPException(400,"单批最多放大 50 张图片，请分批处理")
+    if not profile: raise HTTPException(400,"请选择放大模型")
+    if profile not in {x["id"] for x in _upscale_models()}: raise HTTPException(400,"当前放大模型不可用，请刷新后重新选择")
+    task_id=uuid.uuid4().hex; sources=[]
+    for image_id in ids:
+        img=get_image(image_id)
+        if not img: continue
+        path=Path(img.get("file_path", ""))
+        if not path.is_file(): continue
+        sources.append({"id":image_id,"path":str(path),"name":path.name,"category":category or img.get("category","未分类"),"source":img})
+    if not sources: raise HTTPException(404,"所选图片均不存在或原文件已丢失")
+    with _generation_tasks_lock:
+        _generation_tasks[task_id]={"id":task_id,"kind":"upscale","state":"queued","total":len(sources),"current":0,"completed":0,"failed":0,"gallery_ids":[],"failures":[],"message":"批量放大任务已提交","created_at":time.time(),"cancel_requested":False}
+    threading.Thread(target=_run_upscale_batch_task,args=(task_id,sources,profile),daemon=True,name=f"image-upscale-batch-{task_id[:8]}").start()
+    return {"success":True,"task_id":task_id,"total":len(sources)}
+
+def _run_upscale_batch_task(task_id: str, sources: list[dict], profile: str) -> None:
+    for index,item in enumerate(sources):
+        with _generation_tasks_lock:
+            task=_generation_tasks.get(task_id)
+            if not task: return
+            if task.get("cancel_requested"):
+                task.update({"state":"cancelled","message":"已停止，未处理的图片已保留在队列"}); return
+            task.update({"state":"running","current":index+1,"message":f"正在放大第 {index+1} / {len(sources)} 张：{item['name']}"})
+        try:
+            image_name=_upload_input_to_comfy(Path(item["path"]).read_bytes(), item["name"])
+            _run_upscale_task(task_id,image_name,profile,item["category"],item["source"])
+            with _generation_tasks_lock:
+                t=_generation_tasks.get(task_id,{})
+                if t.get("state")=="failed": t["state"]="running"
+        except Exception as exc:
+            with _generation_tasks_lock:
+                t=_generation_tasks.get(task_id)
+                if t: t["failed"]=(t.get("failed") or 0)+1; t.setdefault("failures",[]).append(f"{item['name']}: {exc}")
+    with _generation_tasks_lock:
+        t=_generation_tasks.get(task_id)
+        if t and t.get("state") not in {"cancelled"}: t.update({"state":"completed","message":f"批量放大完成：成功 {t.get('completed',0)} 张，失败 {t.get('failed',0)} 张","finished_at":time.time()})
+
 @router.get("/debug/last-generation")
 def api_debug_last_generation():
     """返回最后一次生成的调试信息，用于排查提示词问题"""
@@ -875,29 +920,39 @@ def api_debug_last_generation():
 # ── 图库路由 ────────────────────────────────────────────────────────────────
 
 @router.get("/images")
-def api_list_images(query: str = "", model_name: str = "", min_rating: int = 0, category: str = ""):
-    # 查询图库不再隐式全盘扫描 ComfyUI output：大图库下会阻塞分类切换。
-    # 用户点击“扫描 ComfyUI”时才执行明确的全盘扫描。
-    items = list_images(query, model_name, min_rating)
-    if category: items = [x for x in items if x.get("category", "未分类") == category]
-    return {"items": items}
+def api_list_images(query: str = "", model_name: str = "", lora_name: str = "", min_rating: int = 0, category: str = "", sort: str = "newest", limit: int = Query(60, ge=1, le=200), offset: int = Query(0, ge=0)):
+    # 大图库安全模式：数据库分页，前端只拿当前窗口，避免上百 GB 图片拖死进程。
+    items, total = list_images_page(query, model_name, lora_name, min_rating, category, sort, limit, offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset, "has_more": offset + len(items) < total}
+
+def _run_gallery_scan_task(task_id: str) -> None:
+    try:
+        with _generation_tasks_lock:
+            _generation_tasks[task_id].update({"state":"running", "message":"正在后台扫描图库，不会阻塞界面"})
+        output_root = _output_dir()
+        output_added = _scan_output_gallery()
+        history_added = _scan_comfy_history_gallery()
+        with _generation_tasks_lock:
+            _generation_tasks[task_id].update({"state":"completed", "added":output_added+history_added, "output_added":output_added, "history_added":history_added, "output_dir":str(output_root), "message":f"扫描完成：输出目录新增 {output_added} 张、历史记录新增 {history_added} 张", "finished_at":time.time()})
+    except Exception as exc:
+        with _generation_tasks_lock:
+            if task_id in _generation_tasks: _generation_tasks[task_id].update({"state":"failed", "message":"图库扫描失败", "failures":[str(exc)]})
 
 @router.post("/gallery/scan")
 def api_gallery_scan():
-    # 配置了 output 目录时扫描真实文件；无论是否配置都扫描 ComfyUI history，
-    # 这样各类整合包都能导入旧图，且不依赖绝对安装路径。
-    # _output_dir 会自动定位当前正在运行的本地 ComfyUI 的 output 目录；
-    # 读取完整文件树（含子目录）。/history 仅作为无路径场景的补充。
-    output_root = _output_dir()
-    output_added = _scan_output_gallery()
-    history_added = _scan_comfy_history_gallery()
-    return {"success": True, "added": output_added + history_added, "output_added":output_added, "history_added":history_added, "output_dir":str(output_root), "message":f"已从输出目录导入 {output_added} 张、历史记录导入 {history_added} 张"}
+    # 超大图库扫描改为后台任务，避免同步递归扫描卡住 QwenPaw 主界面。
+    task_id=uuid.uuid4().hex
+    with _generation_tasks_lock:
+        _generation_tasks[task_id]={"id":task_id,"kind":"gallery_scan","state":"queued","message":"图库扫描已排队","created_at":time.time()}
+    threading.Thread(target=_run_gallery_scan_task,args=(task_id,),daemon=True,name=f"gallery-scan-{task_id[:8]}").start()
+    return {"success":True,"task_id":task_id,"message":"图库扫描已转入后台，可继续使用其他功能"}
 
 @router.get("/gallery/categories")
 def api_gallery_categories():
     # 同上：分类列表只读取目录，不在每次前端渲染时触发全量扫描。
-    root = _output_dir(); cats = {"未分类"}
-    cats.update(p.name for p in root.iterdir() if p.is_dir())
+    root = _output_dir(); cats = set(list_gallery_categories()) | {"未分类"}
+    try: cats.update(p.name for p in root.iterdir() if p.is_dir())
+    except OSError: pass
     return {"categories": sorted(cats)}
 
 @router.post("/gallery/categories/create")
