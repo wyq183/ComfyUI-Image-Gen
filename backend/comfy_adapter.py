@@ -258,6 +258,79 @@ def apply_lora_chain(workflow: dict[str, Any], params: dict[str, Any], model_ref
         workflow["7"]["inputs"]["model"] = last_model
 
 
+
+def resolve_runtime_assets(params: dict[str, Any], resources: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
+    """在提交工作流前，把绑定中的资源名校准到当前 ComfyUI 实时资源。
+
+    不把另一台机器的工作流文件名直接提交给 ComfyUI：同类型只有一个候选时
+    自动替换；多个候选时返回错误，让前端/用户明确选择；没有候选则拒绝提交。
+    返回 (校准后的参数, warnings, errors)。
+    """
+    out = dict(params or {})
+    warnings: list[str] = []
+    errors: list[str] = []
+    by_kind = (resources or {}).get("resources", {}) or {}
+    def names(*kinds: str) -> list[str]:
+        result=[]
+        for kind in kinds:
+            for value in by_kind.get(kind, []) or []:
+                value=str(value)
+                if value not in result: result.append(value)
+        return result
+    model_name=str(out.get("model_name") or "")
+    model_kind=""
+    for kind in ("unet", "diffusion_models", "checkpoints"):
+        if model_name in names(kind): model_kind=kind; break
+    model_type=classify_model(model_name, model_kind)
+    # 旧绑定的 Anima 模型名可能来自别的整合包；按当前资源重新找同类模型。
+    if model_type in {ANIMA_TYPE, "anima_unknown"} or "anima" in model_name.lower():
+        model_candidates=[x for x in names("unet", "diffusion_models") if classify_model(x, "diffusion_models") == ANIMA_TYPE or "anima" in x.lower()]
+        if model_name not in model_candidates:
+            if len(model_candidates)==1:
+                warnings.append(f"已将不存在的 Anima 模型 {model_name or '（空）'} 替换为本机资源 {model_candidates[0]}")
+                out["model_name"]=model_candidates[0]
+            elif not model_candidates:
+                errors.append(f"本机未检测到可用 Anima/UNet 模型；工作流需要 {model_name or 'Anima 模型'}")
+            else:
+                errors.append(f"Anima 模型 {model_name or '（空）'} 不存在；检测到多个候选，请重新选择：{', '.join(model_candidates)}")
+        clip_candidates=names("text_encoders", "clip")
+        requested_clip=str(out.get("clip_name") or "")
+        if requested_clip not in clip_candidates:
+            preferred=[x for x in clip_candidates if any(t in x.lower() for t in ("qwen", "anima", "t5"))]
+            candidates=preferred or clip_candidates
+            if len(candidates)==1:
+                out["clip_name"]=candidates[0]
+                warnings.append(f"已将不存在的 CLIP {requested_clip or '（空）'} 替换为本机资源 {candidates[0]}")
+            elif not candidates:
+                errors.append("本机未检测到可用 CLIP/text encoder，无法构建 Anima 工作流")
+            else:
+                errors.append(f"CLIP {requested_clip or '（空）'} 不存在；检测到多个候选，请重新选择：{', '.join(candidates)}")
+        vae_candidates=names("vae")
+        requested_vae=str(out.get("vae_name") or "")
+        if requested_vae not in vae_candidates:
+            preferred=[x for x in vae_candidates if "qwen" in x.lower() or "anima" in x.lower()]
+            candidates=preferred or vae_candidates
+            if len(candidates)==1:
+                out["vae_name"]=candidates[0]
+                warnings.append(f"已将不存在的 VAE {requested_vae or '（空）'} 替换为本机资源 {candidates[0]}")
+            elif not candidates:
+                errors.append("本机未检测到可用 VAE，无法构建 Anima 工作流")
+            else:
+                errors.append(f"VAE {requested_vae or '（空）'} 不存在；检测到多个候选，请重新选择：{', '.join(candidates)}")
+    # 采样器/调度器也必须来自当前节点，避免跨版本枚举失效。
+    samplers=list((resources or {}).get("samplers", []) or [])
+    schedulers=list((resources or {}).get("schedulers", []) or [])
+    if samplers and str(out.get("sampler_name") or "") not in samplers:
+        old=str(out.get("sampler_name") or "")
+        out["sampler_name"]="euler" if "euler" in samplers else samplers[0]
+        warnings.append(f"已将不可用采样器 {old} 替换为 {out['sampler_name']}")
+    if schedulers and str(out.get("scheduler") or "") not in schedulers:
+        old=str(out.get("scheduler") or "")
+        out["scheduler"]="normal" if "normal" in schedulers else schedulers[0]
+        warnings.append(f"已将不可用调度器 {old} 替换为 {out['scheduler']}")
+    out["_asset_warnings"]=warnings
+    return out, warnings, errors
+
 def build_workflow_for_model(params: dict[str, Any], kind: str = "") -> tuple[dict[str, Any], str]:
     model_type = classify_model(params.get("model_name", ""), kind)
     if model_type == ANIMA_TYPE:

@@ -28,7 +28,7 @@ from image_store import (
 )
 from comfy_adapter import (
     discover_resources, classify_model, validate_workflow_type_for_model,
-    build_param_schema, build_workflow_for_model,
+    build_param_schema, build_workflow_for_model, resolve_runtime_assets,
 )
 
 # 从 plugin.json 读取版本（唯一定义源）
@@ -308,6 +308,13 @@ def _build_workflow(params: dict) -> dict:
     v0.5: no longer assumes every model is a CheckpointLoaderSimple SDXL model.
     The deterministic adapter classifies the selected model and chooses a builder.
     """
+    # 1.0.1：每次提交前按当前 ComfyUI 实时资源校准旧绑定，禁止跨机器模型名直接下发。
+    api_url = _comfyui_url()
+    resources = discover_resources(api_url)
+    resolved, warnings, errors = resolve_runtime_assets(params, resources)
+    if errors:
+        raise HTTPException(400, {"code":"runtime_asset_mismatch", "message":"当前 ComfyUI 资源与工作流不匹配", "errors":errors, "warnings":warnings, "available":resources.get("resources", {})})
+    params.clear(); params.update(resolved)
     workflow, _model_type = build_workflow_for_model(params)
     category = _safe_category(params.get("category", "未分类"))
     for node in workflow.values():
