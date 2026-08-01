@@ -50,12 +50,10 @@ def list_comfy_models(api_url: str, kind: str, timeout: int = 5) -> list[str]:
 
 
 def discover_resources(api_url: str) -> dict[str, Any]:
-    """读取 ComfyUI 资源索引和真实节点参数。"""
-    object_info = {}
-    try:
-        object_info = fetch_object_info(api_url)
-    except Exception:
-        object_info = {}
+    """读取 ComfyUI 资源索引和真实节点参数。
+       如果 ComfyUI 不可达，直接抛出异常让调用方知道连接状态。
+    """
+    object_info = fetch_object_info(api_url)  # 失败时 raise，不自吞
     resources = {kind: list_comfy_models(api_url, kind) for kind in MODEL_KINDS}
     samplers, schedulers = extract_sampler_scheduler_options(object_info)
     return {
@@ -207,9 +205,9 @@ def build_anima_qwen_workflow(params: dict[str, Any]) -> dict[str, Any]:
     seed = int(params.get("seed", -1))
     if seed < 0:
         seed = int(time.time() * 1000) % 2**32
-    unet_name = params.get("model_name") or params.get("unet_name") or "anima_aestheticV11.safetensors"
-    clip_name = params.get("clip_name") or "qwen_3_06b_base.safetensors"
-    vae_name = params.get("vae_name") or "qwen_image_vae.safetensors"
+    unet_name = params.get("model_name") or params.get("unet_name") or "example-unet.safetensors"
+    clip_name = params.get("clip_name") or "example-clip.safetensors"
+    vae_name = params.get("vae_name") or "example-vae.safetensors"
     workflow: dict[str, Any] = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": params.get("weight_dtype", "default")}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": params.get("clip_type", "qwen_image"), "device": params.get("clip_device", "default")}},

@@ -111,7 +111,7 @@
 
   function GenPanel() {
     var s = React.useState;
-    var state = s(null), model = s(''), tab = s('gen'), task = s(null), review = s(null), settingsTick = s(0), upscaleFile = s(null), upscaleProfile = s('anime_6b'), upscaleCategory = s('未分类'), upscaleProfiles = s([]), imgs = s([]), preview = s(null), busy = s(false), scanning = s(false), galleryLoading = s(false), category = s('未分类'), categories = s(['未分类']), batchMode = s(false), selectedIds = s([]), batchBusy = s(false), gallerySort = s('newest'), galleryModel = s(''), galleryLora = s(''), galleryMinRating = s(0);
+    var state = s(null), model = s(''), tab = s('gen'), task = s(null), review = s(null), settingsTick = s(0), upscaleProfile = s('anime_6b'), upscaleCategory = s('未分类'), upscaleProfiles = s([]), upscaleQueue = s([]), upscaleQueueLoading = s(false), imgs = s([]), preview = s(null), busy = s(false), scanning = s(false), galleryLoading = s(false), galleryHasMore = s(false), galleryTotal = s(0), category = s('未分类'), categories = s(['未分类']), batchMode = s(false), selectedIds = s([]), batchBusy = s(false), gallerySort = s('newest'), galleryModel = s(''), galleryLora = s(''), galleryMinRating = s(0), galleryFilterOptions = s({ models: [], loras: [] });
     var galleryRequest = React.useRef(0);
     var scanFailed = s(false);  // 扫描失败时置 true，让「复制 AI 提示词」按钮切换为找 ComfyUI 的提示词
     var versionMismatch = s('');
@@ -129,38 +129,55 @@
         params[1](schemaDefault(d.params_schema || {}));
       }).catch(function (e) { message.error(e.message); });
     }
-    function loadImages(targetCategory) {
+    function loadImages(targetCategory, append) {
       var selected = targetCategory === undefined ? category[0] : targetCategory;
+      var offset = append ? (imgs[0] || []).length : 0;
+      if (!append) { imgs[1]([]); galleryHasMore[1](false); galleryTotal[1](0); }
       var requestId = ++galleryRequest.current;
-      galleryLoading[1](true); imgs[1]([]);
-      req('/images?category=' + encodeURIComponent(selected) + '&_=' + Date.now()).then(function (d) {
-        // 忽略较早请求的迟到响应，防止切换分类后又被旧分类结果覆盖。
-        if (requestId === galleryRequest.current) imgs[1](d.items || []);
+      galleryLoading[1](true);
+      var qs = '/images?category=' + encodeURIComponent(selected) + '&limit=40&offset=' + offset + '&sort=' + encodeURIComponent(gallerySort[0] || 'newest') + '&_=' + Date.now();
+      if (galleryModel[0]) qs += '&model_name=' + encodeURIComponent(galleryModel[0]);
+      if (galleryLora[0]) qs += '&lora_name=' + encodeURIComponent(galleryLora[0]);
+      if (Number(galleryMinRating[0] || 0) > 0) qs += '&min_rating=' + Number(galleryMinRating[0]);
+      req(qs).then(function (d) {
+        if (requestId !== galleryRequest.current) return;
+        var items = d.items || [];
+        imgs[1](append ? (imgs[0] || []).concat(items) : items);
+        galleryHasMore[1](d.has_more === true);
+        galleryTotal[1](d.total || 0);
       }).catch(function (e) { if (requestId === galleryRequest.current) message.error(e.message || '图库读取失败'); })
         .then(function () { if (requestId === galleryRequest.current) galleryLoading[1](false); });
     }
-    function switchCategory(v) { category[1](v); selectedIds[1]([]); galleryModel[1](''); galleryLora[1](''); galleryMinRating[1](0); loadImages(v); }
+    function loadGalleryFilters(targetCategory) {
+      var selected = targetCategory === undefined ? category[0] : targetCategory;
+      req('/gallery/filters?category=' + encodeURIComponent(selected) + '&_=' + Date.now())
+        .then(function (d) { galleryFilterOptions[1]({ models: (d && d.models) || [], loras: (d && d.loras) || [] }); })
+        .catch(function () {});
+    }
+    function reloadGallery() { loadGalleryFilters(); loadImages(); }
+    function switchCategory(v) { category[1](v); selectedIds[1]([]); galleryModel[1](''); galleryLora[1](''); galleryMinRating[1](0); loadGalleryFilters(v); loadImages(v); }
     function loraLines(value) { return String(value || '').split(/;\s*/).map(function (x) { return x.trim(); }).filter(Boolean); }
     function fileSizeMB(bytes) { return bytes ? (Number(bytes) / 1024 / 1024).toFixed(2) + ' MB' : '—'; }
+    function fmtTime(value) {
+      if (!value) return '—';
+      var t = Date.parse(String(value).replace(/-/g, '/'));
+      if (isNaN(t)) return String(value);
+      var diff = Date.now() - t;
+      if (diff < 0) diff = 0;
+      var m = Math.floor(diff / 60000);
+      if (m < 1) return '刚刚';
+      if (m < 60) return m + ' 分钟前';
+      var h = Math.floor(m / 60);
+      if (h < 24) return h + ' 小时前';
+      var d = Math.floor(h / 24);
+      if (d < 7) return d + ' 天前';
+      var dt = new Date(t);
+      function p(x) { return (x < 10 ? '0' : '') + x; }
+      return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()) + ' ' + p(dt.getHours()) + ':' + p(dt.getMinutes());
+    }
     function galleryItems() {
-      var list = (imgs[0] || []).filter(function (x) {
-        return (!galleryModel[0] || x.model_name === galleryModel[0]) &&
-          (!galleryLora[0] || loraLines(x.lora_name).some(function (name) { return name === galleryLora[0]; })) &&
-          (Number(x.rating || 0) >= Number(galleryMinRating[0] || 0));
-      }).slice();
-      function text(x) { return String(x || '').toLocaleLowerCase(); }
-      function stamp(x) { var t = Date.parse(x.created_at || x.generated_at || ''); return isNaN(t) ? 0 : t; }
-      list.sort(function (a, b) {
-        if (gallerySort[0] === 'oldest') return stamp(a) - stamp(b);
-        if (gallerySort[0] === 'rating_desc') return Number(b.rating || 0) - Number(a.rating || 0) || stamp(b) - stamp(a);
-        if (gallerySort[0] === 'rating_asc') return Number(a.rating || 0) - Number(b.rating || 0) || stamp(b) - stamp(a);
-        if (gallerySort[0] === 'size_desc') return Number(b.file_size || 0) - Number(a.file_size || 0);
-        if (gallerySort[0] === 'size_asc') return Number(a.file_size || 0) - Number(b.file_size || 0);
-        if (gallerySort[0] === 'model') return text(a.model_name).localeCompare(text(b.model_name), 'zh-CN') || stamp(b) - stamp(a);
-        if (gallerySort[0] === 'lora') return text(a.lora_name).localeCompare(text(b.lora_name), 'zh-CN') || stamp(b) - stamp(a);
-        return stamp(b) - stamp(a);
-      });
-      return list;
+      // v1.0.9：排序/筛选已下放到后端 SQL（分页一致），前端不再本地过滤排序。
+      return (imgs[0] || []).slice();
     }
     function toggleSelected(id) { selectedIds[1](function (old) { return old.indexOf(id) >= 0 ? old.filter(function (x) { return x !== id; }) : old.concat([id]); }); }
     function exitBatchMode() { batchMode[1](false); selectedIds[1]([]); }
@@ -171,6 +188,13 @@
         .then(function (r) { message.success('已移动 ' + (r.moved || 0) + ' 张图片到「' + target + '」'); exitBatchMode(); loadImages(category[0]); })
         .catch(function (e) { message.error(e.message || '批量换分类失败'); })
         .then(function () { batchBusy[1](false); });
+    }
+    function batchUpscale() {
+      var ids = selectedIds[0].slice();
+      if (!ids.length) return message.warning('请至少选择一张图片');
+      req('/upscale/queue/add/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_ids: ids }) })
+        .then(function (r) { if (r.success) { message.success('已添加 ' + r.added + ' 张到待放区'); exitBatchMode(); loadUpscaleQueue(); tab[1]('upscale'); } })
+        .catch(function (e) { message.error(e.message || '加入待放区失败'); });
     }
     function batchDelete() {
       var count = selectedIds[0].length; if (!count) return;
@@ -183,11 +207,18 @@
     }
     function loadCategories() { req('/gallery/categories?_=' + Date.now()).then(function (d) { categories[1](d.categories || ['未分类']); }).catch(function () {}); }
     function scanGallery() { galleryLoading[1](true); req('/gallery/scan', { method: 'POST' }).then(function (d) { message.success(d.message || ('已扫描 ' + (d.added || 0) + ' 张图片')); loadCategories(); loadImages(); }).catch(function (e) { galleryLoading[1](false); message.error(e.message); }); }
+    function loadUpscaleQueue() { upscaleQueueLoading[1](true); req('/upscale/queue?_=' + Date.now()).then(function (d) { upscaleQueue[1](d.items || []); }).catch(function (e) { console.warn('读取待放区失败', e); }).then(function () { upscaleQueueLoading[1](false); }); }
+    function addGalleryToUpscaleQueue(img) { if (!img) return; req('/upscale/queue/add/gallery/' + img.id, { method: 'POST' }).then(function (r) { if (r.success) { message.success('已加入待放区'); loadUpscaleQueue(); tab[1]('upscale'); } }).catch(function (e) { message.error(e.message || '加入待放区失败'); }); }
+    function removeFromUpscaleQueue(itemId) { req('/upscale/queue/remove/' + itemId, { method: 'POST' }).then(function (r) { if (r.success) { message.success('已移出待放区'); loadUpscaleQueue(); } }).catch(function (e) { message.error(e.message || '移出失败'); }); }
+    function clearUpscaleQueue() { req('/upscale/queue/clear', { method: 'POST' }).then(function (r) { if (r.success) { upscaleQueue[1]([]); message.success('待放区已清空'); } }).catch(function (e) { message.error(e.message || '清空失败'); }); }
+    function startUpscaleQueue() { req('/upscale/queue/start?profile=' + encodeURIComponent(upscaleProfile[0]), { method: 'POST' }).then(function (r) { if (r.success) { message.success('已提交 ' + r.total + ' 张放大任务'); upscaleQueue[1]([]); task[1]({ id: r.task_id, kind: 'upscale', state: 'queued', total: r.total, completed: 0, message: '放大任务已提交' }); pollUpscaleTask(r.task_id); } }).catch(function (e) { message.error(e.message || '提交放大失败'); }); }
     React.useEffect(function () {
       load();
       loadCategories();
+      loadGalleryFilters();
       loadImages();
       req('/upscale/profiles?_=' + Date.now()).then(function(d){ var items=d.items || []; upscaleProfiles[1](items); if(items.length) upscaleProfile[1](items[0].id); }).catch(function(){});
+      loadUpscaleQueue();
       req('/version?_=' + Date.now()).then(function (v) {
         if (v && v.version && FRONTEND_VERSION && v.version !== FRONTEND_VERSION) {
           var msg = '版本不一致：前端 v' + FRONTEND_VERSION + ' / 后端 v' + v.version + '。请完全退出并重启 QwenPaw Desktop。';
@@ -253,7 +284,7 @@
     function requestAIFindComfyUI() {
       // 扫描失败时的兜底提示词：让 AI 通过 skill 手动配置 ComfyUI 连接
       var text = [
-        '小琪，我的生图插件自动扫描没找到 ComfyUI，请帮我手动配置。',
+        'AI 助手，我的生图插件自动扫描没找到 ComfyUI，请帮我手动配置。',
         '',
         '我的 ComfyUI 可能：',
         '· 用了非标准端口（不在 8000~9000 范围）',
@@ -284,7 +315,7 @@
 
     function requestAIWorkflow() {
       var text = [
-        '小琪，请为我的 ComfyUI 主模型创建并绑定一个生图工作流。',
+        'AI 助手，请为我的 ComfyUI 主模型创建并绑定一个生图工作流。',
         '',
         '【目标模型】' + (model[0] || '当前选中的模型'),
         '【插件任务】',
@@ -329,12 +360,13 @@
     function pollUpscaleTask(taskId) {
       req('/tasks/' + taskId + '?_=' + Date.now()).then(function(t){ task[1](t); if(t.state === 'queued' || t.state === 'running'){ window.setTimeout(function(){pollUpscaleTask(taskId);}, 1000); return; } loadImages(); if(t.state === 'completed'){ message.success('放大完成，已保存到图库'); tab[1]('gallery'); if(reviewPolicyAllows(1)) openReview(t.gallery_ids || []); } else message.error((t.failures&&t.failures[0]) || t.message || '放大失败'); }).catch(function(e){message.error(e.message || '读取放大进度失败');});
     }
-    function doUpscaleUpload() {
-      if(!upscaleFile[0]) return message.warning('先选择一张图片'); var fd=new FormData(); fd.append('image',upscaleFile[0]);
-      req('/upscale/upload?profile='+encodeURIComponent(upscaleProfile[0])+'&category='+encodeURIComponent(upscaleCategory[0]), {method:'POST',body:fd}).then(function(r){ task[1]({id:r.task_id,kind:'upscale',state:'queued',total:1,completed:0,message:'放大任务已提交'}); pollUpscaleTask(r.task_id); }).catch(function(e){message.error(e.message || '提交放大失败');});
+    function doUpscaleUpload(file) {
+      var f = file || upscaleFile[0];
+      if(!f) return message.warning('先选择一张图片'); var fd=new FormData(); fd.append('image',f);
+      req('/upscale/queue/add/upload?category='+encodeURIComponent(upscaleCategory[0]), {method:'POST',body:fd}).then(function(r){ if(r.success) { message.success('已加入待放区'); upscaleFile[1](null); loadUpscaleQueue(); } }).catch(function(e){message.error(e.message || '上传失败');});
     }
     function upscaleGalleryImage(img) {
-      if(!img) return; req('/upscale/gallery/'+img.id+'?profile='+encodeURIComponent(upscaleProfile[0])+'&category='+encodeURIComponent(img.category || upscaleCategory[0]), {method:'POST'}).then(function(r){ preview[1](null); task[1]({id:r.task_id,kind:'upscale',state:'queued',total:1,completed:0,message:'放大任务已提交'}); pollUpscaleTask(r.task_id); }).catch(function(e){message.error(e.message || '提交放大失败');});
+      addGalleryToUpscaleQueue(img);
     }
 
     function doGen() {
@@ -367,7 +399,7 @@
         h(Button, { type: tab[0] === 'upscale' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('upscale'); } }, '放大'),
         h(Button, { type: tab[0] === 'settings' ? 'primary' : 'text', size: 'small', style: { flex: 1, borderRadius: 0 }, onClick: function () { tab[1]('settings'); } }, '设置')
       ),
-      versionMismatch[0] ? h(Alert, { type: 'warning', showIcon: true, message: '缓存版本不一致', description: versionMismatch[0], style: { margin: 10 } }) : null,
+      versionMismatch[0] ? h(Alert, { type: 'warning', showIcon: true, message: '缓存版本不一致', description: versionMismatch[0], action: h(Button, { size: 'small', type: 'primary', onClick: function () { versionMismatch[1](''); location.reload(); } }, '重新加载'), style: { margin: 10 } }) : null,
       task[0] && (task[0].state === 'queued' || task[0].state === 'running') ? h('div', { style:{margin:8,padding:10,border:'1px solid var(--ant-color-primary)',borderRadius:7,background:'var(--ant-color-fill-quaternary)'} },
         h('div',{style:{fontWeight:700,fontSize:12}}, (task[0].kind === 'upscale' ? '图片放大 · ' : '生成任务 · ') + (task[0].message || '正在处理中')),
         h('div',{style:{height:6,background:'var(--ant-color-fill-secondary)',borderRadius:4,overflow:'hidden',margin:'8px 0'}},h('div',{style:{height:'100%',width:Math.round((Number(task[0].completed||0)/Math.max(1,Number(task[0].total||1)))*100)+'%',background:'var(--ant-color-primary)',transition:'width .25s'}})),
@@ -445,19 +477,37 @@
           )
         )
       ) : null,
-      tab[0] === 'upscale' ? h('div',{style:{flex:1,overflowY:'auto'}},
-        h(Section,{title:'图片放大'},
-          h(Alert,{type:upscaleProfiles[0].length?'info':'warning',showIcon:true,message:upscaleProfiles[0].length?'已自动读取当前 ComfyUI 的放大模型':'当前 ComfyUI 未检测到放大模型',description:upscaleProfiles[0].length?'模型列表来自 UpscaleModelLoader；放大结果将自动保存到图库。':'请在 ComfyUI 安装任意放大模型后点击右上角「刷新」。常见目录为 models/upscale_models。',style:{marginBottom:10}}),
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:4}},'选择图片'),
-          h('input',{type:'file',accept:'.png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp',onChange:function(e){upscaleFile[1](e.target.files && e.target.files[0] || null);},style:{width:'100%',fontSize:12,marginBottom:6}}),
-          upscaleFile[0] ? h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:10}},'已选择：'+upscaleFile[0].name) : h('div',{style:{fontSize:11,color:'var(--ant-color-text-tertiary)',marginBottom:10}},'也可以在图库图片详情中直接点「放大这张」'),
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:4}},'放大流程'),
-          h(Select,{size:'small',value:upscaleProfile[0],style:{width:'100%',marginBottom:10},onChange:function(v){upscaleProfile[1](v);},options:upscaleProfiles[0].map(function(x){return {value:x.id,label:x.label + ' · ' + (x.recommendation || '')};})}),
-          h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:4}},'保存分类'),
-          h(Select,{size:'small',value:upscaleCategory[0],style:{width:'100%',marginBottom:12},onChange:function(v){upscaleCategory[1](v);},options:categories[0].map(function(x){return {value:x,label:x};})}),
-          h(Button,{type:'primary',block:true,onClick:doUpscaleUpload,disabled:!upscaleFile[0] || !upscaleProfiles[0].length},'开始放大')
+      tab[0] === 'upscale' ? h('div',{style:{flex:1,overflowY:'auto',padding:'0 4px'}},
+        h(Section,{title:'待放大区'},
+          h(Alert,{type:upscaleProfiles[0].length?'info':'warning',showIcon:true,message:upscaleProfiles[0].length?'已读取 '+upscaleProfiles[0].length+' 个放大模型':'未检测到放大模型',description:upscaleProfiles[0].length?'从图库或本地上传图片到待放区，选好模型后统一点「开始放大」':'请在 ComfyUI 安装放大模型后点击右上角刷新',style:{marginBottom:8}}),
+          h('div',{style:{display:'flex',gap:4,marginBottom:6}},
+            h('input',{type:'file',accept:'.png,.jpg,.jpeg,.webp',onChange:function(e){var f=e.target.files&&e.target.files[0];if(f){upscaleFile[1](f);doUpscaleUpload(f);e.target.value='';}},style:{flex:1,fontSize:11}}),
+            h(Button,{size:'small',onClick:function(){tab[1]('gallery');batchMode[1](true);message.info('选择图片后点「加入待放区」')}},h('span',{style:{fontSize:11}},'从图库选'))
+          ),
+          upscaleQueueLoading[0] ? h('div',{style:{fontSize:11,color:'var(--ant-color-text-tertiary)',padding:8}},'加载中...') :
+          upscaleQueue[0].length ? h('div',{style:{marginBottom:8}},
+            h('div',{style:{fontSize:11,color:'var(--ant-color-text-secondary)',marginBottom:4}},'待放区（共 '+upscaleQueue[0].length+' 张）'),
+            h('div',{style:{maxHeight:180,overflowY:'auto',border:'1px solid var(--border-color-split)',borderRadius:4,padding:4}},
+              upscaleQueue[0].map(function(item){
+                var sizeStr = item.file_path ? '—' : '—';
+                return h('div',{key:item.id,style:{display:'flex',alignItems:'center',gap:4,padding:'2px 0',borderBottom:'1px solid var(--border-color-split)'}},
+                  h('span',{style:{flex:1,fontSize:11,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},item.file_name || '未知文件'),
+                  h('span',{style:{fontSize:10,color:'var(--ant-color-text-tertiary)',marginRight:4}},item.source === 'upload' ? '本地上传' : '图库'),
+                  h(Button,{size:'small',type:'text',danger:true,onClick:function(){removeFromUpscaleQueue(item.id);}},'✕')
+                );
+              })
+            )
+          ) : h('div',{style:{fontSize:11,color:'var(--ant-color-text-tertiary)',padding:'8px 0',textAlign:'center'}},'待放区为空，从图库选择或上传图片'),
+          h('div',{style:{display:'flex',gap:4,marginTop:6}},
+            h(Select,{size:'small',value:upscaleProfile[0],style:{flex:1},onChange:function(v){upscaleProfile[1](v);},options:upscaleProfiles[0].map(function(x){return {value:x.id,label:x.label + ' · ' + (x.recommendation || '')};})}),
+            h(Select,{size:'small',value:upscaleCategory[0],style:{width:100},onChange:function(v){upscaleCategory[1](v);},options:categories[0].map(function(x){return {value:x,label:x};})})
+          ),
+          h('div',{style:{display:'flex',gap:4,marginTop:6}},
+            h(Button,{type:'primary',block:true,onClick:startUpscaleQueue,disabled:!upscaleQueue[0].length || !upscaleProfiles[0].length},'开始放大'),
+            h(Button,{block:true,disabled:!upscaleQueue[0].length,onClick:clearUpscaleQueue},'清空')
+          )
         ),
-        h(Section,{title:'自动适配说明'},h('div',{style:{fontSize:12,lineHeight:'21px',color:'var(--ant-color-text-secondary)'}},'插件不内置也不下载模型；它会读取你当前 ComfyUI 已安装的放大模型。名称中带 anime 的模型会标为二次元推荐，常见 ESRGAN / x4plus 类模型标为通用推荐，其余模型也可手动选择。'))
+        h(Section,{title:'说明'},h('div',{style:{fontSize:12,lineHeight:'20px',color:'var(--ant-color-text-secondary)'}},'1. 在图库中选中图片后点「加入待放区」或直接本地上传\n2. 在待放区确认要放大的图片（可移除）\n3. 选择放大模型和保存分类后点「开始放大」\n放大结果将自动保存到图库。'))
       ) : null,
       tab[0] === 'settings' ? h('div',{style:{flex:1,overflowY:'auto'}},
         h(Section,{title:'生成完成与审阅'},
@@ -475,6 +525,7 @@
         h('div', { style: { padding: 8, display: 'flex', gap: 6, borderBottom: '1px solid var(--border-color-split)' } },
           h(Select, { size: 'small', value: category[0], style: { flex: 1 }, options: [{ value: '', label: '全部分类' }].concat(categories[0].map(function (x) { return { value: x, label: x }; })), disabled: galleryLoading[0] || batchMode[0], onChange: switchCategory }),
           h(Button, { size: 'small', onClick: scanGallery, disabled: batchMode[0] }, '扫描'),
+          h(Button, { size: 'small', onClick: function () { req('/gallery/cleanup-missing', { method: 'POST' }).then(function (d) { message.success(d.message || ('已清理 ' + (d.cleaned || 0) + ' 条无源文件记录')); reloadGallery(); }).catch(function (e) { message.error(e.message || '清理失败'); }); }, disabled: batchMode[0] }, '清理失效'),
           h(Button, { size: 'small', onClick: function () { var n = window.prompt('新建分类名称'); if (!n || !n.trim()) return; req('/gallery/categories/create?name=' + encodeURIComponent(n.trim()), { method: 'POST' }).then(function () { loadCategories(); switchCategory(n.trim()); }).catch(function (e) { message.error(e.message); }); }, disabled: batchMode[0] }, '+ 分类'),
           h(Button, { size: 'small', type: batchMode[0] ? 'primary' : 'default', onClick: function () { batchMode[0] ? exitBatchMode() : batchMode[1](true); } }, batchMode[0] ? '取消' : '批量')
         ),
@@ -485,26 +536,29 @@
               { value: 'rating_desc', label: '排序：星级高→低' }, { value: 'rating_asc', label: '排序：星级低→高' },
               { value: 'size_desc', label: '排序：文件大→小' }, { value: 'size_asc', label: '排序：文件小→大' },
               { value: 'model', label: '排序：模型名称' }, { value: 'lora', label: '排序：LoRA 名称' }
-            ], onChange: function (v) { gallerySort[1](v); selectedIds[1]([]); }, disabled: batchMode[0] }),
-            h(Select, { size: 'small', value: galleryMinRating[0], style: { width: '100%', minWidth: 0 }, options: [{ value: 0, label: '星级：全部' }, { value: 1, label: '星级：≥ 1 星' }, { value: 2, label: '星级：≥ 2 星' }, { value: 3, label: '星级：≥ 3 星' }, { value: 4, label: '星级：≥ 4 星' }, { value: 5, label: '星级：5 星' }], onChange: function (v) { galleryMinRating[1](v); selectedIds[1]([]); }, disabled: batchMode[0] })
+            ], onChange: function (v) { gallerySort[1](v); selectedIds[1]([]); loadImages(category[0]); }, disabled: batchMode[0] }),
+            h(Select, { size: 'small', value: galleryMinRating[0], style: { width: '100%', minWidth: 0 }, options: [{ value: 0, label: '星级：全部' }, { value: 1, label: '星级：≥ 1 星' }, { value: 2, label: '星级：≥ 2 星' }, { value: 3, label: '星级：≥ 3 星' }, { value: 4, label: '星级：≥ 4 星' }, { value: 5, label: '星级：5 星' }], onChange: function (v) { galleryMinRating[1](v); selectedIds[1]([]); loadImages(category[0]); }, disabled: batchMode[0] })
           ),
-          h(Select, { size: 'small', allowClear: true, showSearch: true, optionFilterProp: 'label', placeholder: '筛选模型（可搜索）', value: galleryModel[0] || undefined, style: { width: '100%', minWidth: 0 }, options: Array.from(new Set((imgs[0] || []).map(function (x) { return x.model_name; }).filter(Boolean))).sort().map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryModel[1](v || ''); selectedIds[1]([]); }, disabled: batchMode[0] }),
-          h(Select, { size: 'small', allowClear: true, showSearch: true, optionFilterProp: 'label', placeholder: '筛选 LoRA（可搜索）', value: galleryLora[0] || undefined, style: { width: '100%', minWidth: 0 }, options: Array.from(new Set([].concat.apply([], (imgs[0] || []).map(function (x) { return loraLines(x.lora_name); })))).sort().map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryLora[1](v || ''); selectedIds[1]([]); }, disabled: batchMode[0] })
+          h(Select, { size: 'small', allowClear: true, showSearch: true, optionFilterProp: 'label', placeholder: '筛选模型（可搜索）', value: galleryModel[0] || undefined, style: { width: '100%', minWidth: 0 }, options: (galleryFilterOptions[0].models || []).map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryModel[1](v || ''); selectedIds[1]([]); loadImages(category[0]); }, disabled: batchMode[0] }),
+          h(Select, { size: 'small', allowClear: true, showSearch: true, optionFilterProp: 'label', placeholder: '筛选 LoRA（可搜索）', value: galleryLora[0] || undefined, style: { width: '100%', minWidth: 0 }, options: (galleryFilterOptions[0].loras || []).map(function (x) { return { value: x, label: x }; }), onChange: function (v) { galleryLora[1](v || ''); selectedIds[1]([]); loadImages(category[0]); }, disabled: batchMode[0] })
         ),
         batchMode[0] ? h('div', { style: { padding: '6px 8px', display: 'flex', gap: 6, alignItems: 'center', borderBottom: '1px solid var(--border-color-split)', background: 'var(--ant-color-fill-quaternary)' } },
           h('span', { style: { fontSize: 12, whiteSpace: 'nowrap' } }, '已选 ' + selectedIds[0].length + ' 张'),
           h(Button, { size: 'small', disabled: batchBusy[0] || !galleryItems().length, onClick: function () { selectedIds[1](selectedIds[0].length === galleryItems().length ? [] : galleryItems().map(function (x) { return x.id; })); } }, selectedIds[0].length === galleryItems().length && galleryItems().length ? '取消全选' : '全选当前页'),
           h(Select, { size: 'small', placeholder: '换分类', disabled: batchBusy[0] || !selectedIds[0].length, style: { flex: 1, minWidth: 88 }, options: categories[0].map(function (x) { return { value: x, label: x }; }), onChange: batchMove }),
+          h(Button, { size: 'small', disabled: batchBusy[0] || !selectedIds[0].length, onClick: batchUpscale }, '加入待放区'),
           h(Button, { size: 'small', danger: true, disabled: batchBusy[0] || !selectedIds[0].length, onClick: batchDelete }, '删除')
         ) : null,
-        h('div', { style: { flex: 1, overflowY: 'auto', padding: 8, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, alignContent: 'start' } },
-          galleryLoading[0] ? h('div', { style: { gridColumn: '1/-1', paddingTop: 40, textAlign: 'center', color: 'var(--ant-color-text-secondary)' } }, '正在加载「' + (category[0] || '全部分类') + '」…') :
-          galleryItems().length ? galleryItems().map(function (img) {
+        h('div', { style: { flex: 1, overflowY: 'auto', padding: '4px 4px', display: 'flex', flexWrap: 'wrap', gap: 8, alignContent: 'flex-start' } },
+          galleryLoading[0] && !(imgs[0]||[]).length ? h('div', { style: { width: '100%', paddingTop: 40, textAlign: 'center', color: 'var(--ant-color-text-secondary)' } }, '正在加载「' + (category[0] || '全部分类') + '」…') :
+          galleryItems().length ? (function(){ var items = galleryItems(); var list = items.map(function (img) {
             var checked = selectedIds[0].indexOf(img.id) >= 0;
-            return h('div', { key: img.id, onClick: function () { batchMode[0] ? toggleSelected(img.id) : preview[1](img.id); }, style: { position: 'relative', aspectRatio: '1/1', border: checked ? '2px solid var(--ant-color-primary)' : '1px solid var(--border-color-split)', borderRadius: 6, overflow: 'hidden', cursor: 'pointer', boxSizing: 'border-box' } },
+            return h('div', { key: img.id, onClick: function () { batchMode[0] ? toggleSelected(img.id) : preview[1](img.id); }, style: { position: 'relative', width: 120, height: 120, border: checked ? '2px solid var(--ant-color-primary)' : '1px solid var(--border-color-split)', borderRadius: 6, overflow: 'hidden', cursor: 'pointer', boxSizing: 'border-box', flexShrink: 0 } },
               h('img', { src: iurl(img.id), style: { width: '100%', height: '100%', objectFit: 'cover' } }),
-              batchMode[0] ? h('div', { style: { position: 'absolute', top: 5, left: 5, width: 18, height: 18, borderRadius: 10, background: checked ? 'var(--ant-color-primary)' : 'rgba(0,0,0,.5)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700 } }, checked ? '✓' : '') : null);
-          }) : h('div', { style: { gridColumn: '1/-1', paddingTop: 40 } }, h(Empty, { description: (imgs[0] || []).length ? '没有符合当前筛选条件的图片' : '还没有图片' }))
+              batchMode[0] ? h('div', { style: { position: 'absolute', top: 4, left: 4, width: 18, height: 18, borderRadius: 10, background: checked ? 'var(--ant-color-primary)' : 'rgba(0,0,0,.5)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700 } }, checked ? '✓' : '') : null);
+          }); if (galleryHasMore[0] && !galleryLoading[0]) { list.push(h('div', { key: '_loadmore', style: { width: '100%', textAlign: 'center', padding: 8 } },
+            h(Button, { size: 'small', onClick: function () { loadImages(category[0], true); } }, '加载更多（' + galleryTotal[0] + ' 张中的 ' + (imgs[0]||[]).length + ' 张）')
+          )); } if (galleryLoading[0]) { list.push(h('div', { key: '_loading', style: { width: '100%', textAlign: 'center', padding: 8 } }, '加载中…')); } return list; })() : h('div', { style: { width: '100%', paddingTop: 40, textAlign: 'center' } }, h(Empty, { description: (imgs[0] || []).length ? '没有符合当前筛选条件的图片' : '还没有图片' }))
         )
       ) : null,
       review[0] ? (function(){ var ids=(review[0].ids||[]).slice(-(Number(setting('review_limit','4'))||4)); var all=review[0].ids||[]; var currentId=ids[ids.length-1]; return h(Modal,{open:true,width:720,footer:null,title:'本次生成结果 · '+all.length+' 张',onCancel:function(){review[1](null);}},
@@ -556,7 +610,7 @@
             InfoRow('Steps', img.steps, false),
             InfoRow('CFG', img.cfg, false),
             InfoRow('Seed', img.seed, false),
-            InfoRow('生成时间', img.created_at || img.generated_at, false)
+            InfoRow('生成时间', fmtTime(img.generated_at || img.created_at), false)
           ),
           h(Divider, { style: { margin: '8px 0 10px' } }),
           InfoRow('正向提示词', img.prompt, true),
@@ -636,7 +690,7 @@
           h('li', null, '❌ 重置 ComfyUI 连接配置'),
           h('li', null, '❌ 清除所有生图配方')
         ),
-        h('p', { style: { color: 'var(--ant-color-error)', fontWeight: 700, fontSize: 14 } }, '⚠️ 此操作不可撤销！数据将永久丢失！'),
+        h('p', { style: { color: 'var(--ant-color-error)', fontWeight: 700, fontSize: 14 } }, '⚠️ 将清理失效绑定和输出目录配置，不会删除图库原图。'),
         h(Button, {
           type: 'primary', danger: true,
           onClick: function () { step1[1](true); },
@@ -681,7 +735,7 @@
           onOk: doRepair,
           onCancel: function () { step2[1](false); },
           confirmLoading: repairing[0],
-          okText: '确认修复，删除所有数据',
+          okText: '确认修复配置',
           okButtonProps: { danger: true },
           cancelText: '取消',
           width: 520
@@ -689,7 +743,7 @@
           h('p', { style: { fontSize: 14, fontWeight: 700, color: 'red' } },
             '这是最后一次确认机会。'),
           h('p', { style: { marginTop: 12 } },
-            '点击「确认修复，删除所有数据」后：'),
+            '点击「确认修复配置」后：'),
           h('ul', { style: { lineHeight: 2 } },
             h('li', null, '所有绑定、预设、图库、配方将立即删除'),
             h('li', null, '图片文件将被彻底清除'),
@@ -697,7 +751,7 @@
             h('li', null, '页面将在 3 秒后自动刷新')
           ),
           h('p', { style: { color: 'red', fontWeight: 700, marginTop: 16, fontSize: 14 } },
-            '🔴 此操作不可撤销！请确认你确实要删除所有数据。')
+            '🔴 请确认要清理失效绑定并恢复配置。图库原图和图片记录会保留。')
         )
       );
     }
@@ -706,7 +760,7 @@
       var checked = React.useState(isOn());
       return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' } },
         h('span', null, '✨ ComfyUI 生图助手'),
-        h(Switch, { size: 'small', checked: checked[0], onClick: function(e){e.stopPropagation();e.preventDefault();}, onChange: function(v,e){ if(e){e.stopPropagation();e.preventDefault();} checked[1](v); setOn(v); emitToggle(v); } })
+        h(Switch, { size: 'small', checked: checked[0], onClick: function(checked, e){ if(e){e.stopPropagation();e.preventDefault();} }, onChange: function(v,e){ if(e){e.stopPropagation();e.preventDefault();} checked[1](v); setOn(v); emitToggle(v); } })
       );
     }
     Q.menu.add(pid, { id: pid + '.menu', label: h(MenuSwitch), route: pid + '.settings', location: 'primary.agentScoped', order: 66 });

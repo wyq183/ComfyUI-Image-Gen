@@ -1,13 +1,13 @@
 {
   "id": "qwenpaw-image-gen",
   "name": "ComfyUI 生图助手",
-  "version": "1.0.2",
+  "version": "1.0.9",
   "type": "general",
   "description": "面向 QwenPaw 的本地 ComfyUI 图像创作助手：自动适配模型与放大资源、生成任务、图库管理和参数复用。",
   "author": "QwenPaw Image Gen Contributors",
   "entry": {
     "backend": "backend/plugin.py",
-    "frontend": "ui/index.1.0.2.js"
+    "frontend": "ui/index.1.0.9.js"
   },
   "dependencies": [
     "pillow>=10.0.0",

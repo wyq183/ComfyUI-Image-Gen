@@ -24,7 +24,7 @@ name: image-gen-assist
 参数说明：
 - prompt (必需): 正向提示词，描述画面内容
 - negative_prompt (可选): 负向提示词
-- model_name: 模型名（默认 waiIllustriousSDXL_v170.safetensors）
+- model_name: 模型名（默认 example-model.safetensors）
 - steps: 采样步数（默认 20）
 - cfg: 提示词相关性（默认 7.0）
 - width / height: 图片尺寸（默认 1024×1024）
@@ -42,6 +42,42 @@ name: image-gen-assist
 
 ### `image_gen_check_status` — 检查 ComfyUI 状态
 返回连接状态、可用模型列表、已连接的端口。
+
+### `image_gen_register_workflow_preset` — 注册自定义工作流（AI 协作）
+让 AI 创建新的 ComfyUI 工作流模板并注册到插件中。
+
+```json
+参数：
+- name (必需): 工作流预设名称
+- workflow_json (必需): 符合 ComfyUI API 格式的工作流 JSON 字符串
+  - 必须是有效的 JSON 字典，例如 {"3":{"inputs":{"seed":42,...},"class_type":"KSampler",...}}
+  - AI 应根据 ComfyUI 的 /object_info 返回的可用节点来构建
+- description (可选): 工作流描述
+- model_type (可选): 模型类型（默认 "custom"）
+- params_schema (可选): 参数 schema JSON，定义暴露给用户的参数
+- sort_order (可选): 排序优先级（默认 1000）
+```
+
+**使用场景：**
+- 用户想要新的生图方式（如 ControlNet、AnimateDiff、IPAdapter 等）
+- AI 分析 ComfyUI 可用节点后构造对应的工作流
+- 注册后用户可以在生图面板的「工作流预设」下拉菜单中选用
+
+### `image_gen_apply_workflow_preset` — 绑定工作流到模型
+将已注册的工作流预设应用到指定模型。
+
+```json
+参数：
+- preset_id (必需): 工作流预设的 ID
+- model_name (必需): 要绑定的模型名称
+```
+
+**典型流程：**
+1. AI 调用 `image_gen_check_status` 查看可用模型和 ComfyUI 节点
+2. AI 构造符合 ComfyUI API 格式的工作流 JSON
+3. AI 调用 `image_gen_register_workflow_preset` 注册工作流
+4. AI 调用 `image_gen_apply_workflow_preset` 绑定到模型
+5. 用户即可在面板中使用新工作流
 
 ---
 

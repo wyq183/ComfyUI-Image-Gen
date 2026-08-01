@@ -174,9 +174,9 @@ DEFAULT_PARAM_SCHEMA = {
 }
 
 DEFAULT_WORKFLOW_PRESETS = [
-    ("SDXL 通用文生图", "适合 JuggernautXL、RealVisXL、DreamShaperXL、普通 SDXL checkpoint。", "sdxl", {**DEFAULT_PARAM_SCHEMA, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 24}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 6.5}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "dpmpp_2m"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "karras"}}, 10),
-    ("Illustrious / WAI 二次元", "适合 WAI Illustrious、NoobAI、Animagine 等 SDXL 二次元模型。", "illustrious", {**DEFAULT_PARAM_SCHEMA, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 28}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 5.5}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "euler"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "normal"}}, 20),
-    ("Pony / AutismMix 通用", "适合 Pony Diffusion XL 体系、AutismMix、相关 furry / 角色模型。", "pony", {**DEFAULT_PARAM_SCHEMA, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 30}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 6.0}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "dpmpp_2m"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "karras"}}, 30),
+    ("SDXL 通用文生图", "适合通用 SDXL checkpoint。", "sdxl", {**DEFAULT_PARAM_SCHEMA, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 24}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 6.5}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "dpmpp_2m"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "karras"}}, 10),
+    ("Illustrious 二次元", "适合 Illustrious、NoobAI、Animagine 等 SDXL 二次元模型。", "illustrious", {**DEFAULT_PARAM_SCHEMA, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 28}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 5.5}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "euler"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "normal"}}, 20),
+    ("Pony 通用", "适合 Pony Diffusion XL 体系、相关角色模型。", "pony", {**DEFAULT_PARAM_SCHEMA, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 30}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 6.0}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "dpmpp_2m"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "karras"}}, 30),
     ("SD1.5 通用文生图", "适合 Anything、Counterfeit、MajicMix、老版二次元/写实 SD1.5 checkpoint。", "sd15", {**DEFAULT_PARAM_SCHEMA, "width": {**DEFAULT_PARAM_SCHEMA["width"], "default": 512, "max": 1024}, "height": {**DEFAULT_PARAM_SCHEMA["height"], "default": 768, "max": 1024}, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 25}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 7.0}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "dpmpp_2m"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "karras"}}, 40),
     ("快速预览 / 低步数", "用于快速看构图和提示词方向，质量不是最终版。", "preview", {**DEFAULT_PARAM_SCHEMA, "steps": {**DEFAULT_PARAM_SCHEMA["steps"], "default": 12}, "cfg": {**DEFAULT_PARAM_SCHEMA["cfg"], "default": 5.0}, "sampler_name": {**DEFAULT_PARAM_SCHEMA["sampler_name"], "default": "euler"}, "scheduler": {**DEFAULT_PARAM_SCHEMA["scheduler"], "default": "normal"}}, 50),
 ]
@@ -262,15 +262,57 @@ def list_images_page(query: str = "", model_name: str = "", lora_name: str = "",
     if lora_name: where.append("lora_name LIKE ?"); args.append(f"%{lora_name}%")
     if category: where.append("category=?"); args.append(category)
     if min_rating: where.append("rating>=?"); args.append(int(min_rating))
-    order={"oldest":"created_at ASC", "rating_desc":"rating DESC, created_at DESC", "rating_asc":"rating ASC, created_at DESC", "size_desc":"file_size DESC", "size_asc":"file_size ASC", "model":"model_name COLLATE NOCASE ASC, created_at DESC", "lora":"lora_name COLLATE NOCASE ASC, created_at DESC"}.get(sort,"created_at DESC")
+    order={"oldest":"generated_at ASC, id ASC", "rating_desc":"rating DESC, generated_at DESC, id DESC", "rating_asc":"rating ASC, generated_at DESC, id DESC", "size_desc":"file_size DESC, id DESC", "size_asc":"file_size ASC, id ASC", "model":"model_name COLLATE NOCASE ASC, generated_at DESC, id DESC", "lora":"lora_name COLLATE NOCASE ASC, generated_at DESC, id DESC"}.get(sort,"generated_at DESC, id DESC")
     clause=" AND ".join(where)
     total=int(conn.execute(f"SELECT COUNT(*) AS n FROM gallery_images WHERE {clause}",args).fetchone()["n"])
     rows=conn.execute(f"SELECT id,file_path,file_name,file_size,width,height,prompt,negative_prompt,model_name,lora_name,category,workflow_id,steps,cfg,seed,rating,notes,created_at,generated_at FROM gallery_images WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",args+[limit,offset]).fetchall()
-    conn.close(); return [dict(x) for x in rows], total
+    conn.close()
+    items = []
+    for x in rows:
+        d = dict(x)
+        d["file_exists"] = Path(d["file_path"]).is_file()
+        items.append(d)
+    return items, total
+
+def cleanup_missing_images() -> int:
+    """删除所有源文件已不存在的图库记录（标记 deleted=1），返回清理数量。"""
+    conn = _get_db()
+    try:
+        rows = conn.execute("SELECT id, file_path FROM gallery_images WHERE deleted=0").fetchall()
+        missing = [r["id"] for r in rows if not Path(r["file_path"]).is_file()]
+        for i in missing:
+            conn.execute("UPDATE gallery_images SET deleted=1 WHERE id=?", (i,))
+        conn.commit()
+    finally:
+        conn.close()
+    return len(missing)
 
 def list_gallery_categories() -> list[str]:
     conn=_get_db(); rows=conn.execute("SELECT DISTINCT category FROM gallery_images WHERE deleted=0 AND category<>'' ORDER BY category COLLATE NOCASE").fetchall(); conn.close()
     return [str(x["category"]) for x in rows]
+
+def list_gallery_filters(category: str = "") -> dict:
+    """返回当前分类下的筛选选项（模型 / LoRA / 星级），供前端下拉使用。
+
+    与 list_images_page 的分页查询解耦：筛选下拉不再依赖当前页已加载的 40 张，
+    而是按数据库全量（当前分类）去重统计，避免“第一页没这个模型，下拉就没有”。
+    """
+    conn = _get_db(); where = ["deleted=0"]; args = []
+    if category:
+        where.append("category=?"); args.append(category)
+    clause = " AND ".join(where)
+    models = [str(x["model_name"]) for x in conn.execute(f"SELECT DISTINCT model_name FROM gallery_images WHERE {clause} AND model_name<>'' ORDER BY model_name COLLATE NOCASE", args).fetchall()]
+    loras_raw = [str(x["lora_name"]) for x in conn.execute(f"SELECT DISTINCT lora_name FROM gallery_images WHERE {clause} AND lora_name<>''", args).fetchall()]
+    loras = []
+    for line in loras_raw:
+        for part in str(line).split(";"):
+            name = part.strip()
+            if name:
+                loras.append(name)
+    loras = sorted(set(loras), key=str.lower)
+    ratings = [int(x["rating"]) for x in conn.execute(f"SELECT DISTINCT rating FROM gallery_images WHERE {clause} AND rating>0 ORDER BY rating", args).fetchall()]
+    conn.close()
+    return {"models": models, "loras": loras, "ratings": ratings}
 
 def get_image(image_id: int) -> Optional[dict]:
     conn = _get_db()
@@ -280,15 +322,25 @@ def get_image(image_id: int) -> Optional[dict]:
 
 def add_image(file_path: str, file_name: str, file_size: int = 0, width: int = 0, height: int = 0,
               prompt: str = "", negative_prompt: str = "", model_name: str = "", lora_name: str = "",
-              workflow_id: int = 0, steps: int = 20, cfg: float = 7.0, seed: int = -1, category: str = '未分类') -> dict:
+              workflow_id: int = 0, steps: int = 20, cfg: float = 7.0, seed: int = -1, category: str = '未分类',
+              generated_at: str | None = None) -> dict:
     conn = _get_db()
-    cur = conn.execute(
-        """INSERT INTO gallery_images (file_path,file_name,file_size,width,height,
-           prompt,negative_prompt,model_name,lora_name,category,workflow_id,steps,cfg,seed)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (file_path, file_name, file_size, width, height, prompt, negative_prompt,
-         model_name, lora_name, category, workflow_id, steps, cfg, seed)
-    )
+    if generated_at:
+        cur = conn.execute(
+            """INSERT INTO gallery_images (file_path,file_name,file_size,width,height,
+               prompt,negative_prompt,model_name,lora_name,category,workflow_id,steps,cfg,seed,generated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (file_path, file_name, file_size, width, height, prompt, negative_prompt,
+             model_name, lora_name, category, workflow_id, steps, cfg, seed, generated_at)
+        )
+    else:
+        cur = conn.execute(
+            """INSERT INTO gallery_images (file_path,file_name,file_size,width,height,
+               prompt,negative_prompt,model_name,lora_name,category,workflow_id,steps,cfg,seed)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (file_path, file_name, file_size, width, height, prompt, negative_prompt,
+             model_name, lora_name, category, workflow_id, steps, cfg, seed)
+        )
     conn.commit()
     row = conn.execute("SELECT * FROM gallery_images WHERE id=?", (cur.lastrowid,)).fetchone()
     conn.close()

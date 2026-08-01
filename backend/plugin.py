@@ -2,6 +2,7 @@
 """生图助手 — 后端路由 / ComfyUI 桥接 / Agent 工具注册"""
 from __future__ import annotations
 import json, os, sys, time, uuid, logging, hashlib, threading, subprocess, re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 import ctypes
@@ -19,7 +20,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from qwenpaw.plugins.api import PluginApi
 from image_store import (
-    list_images, list_images_page, list_gallery_categories, get_image, add_image, update_rating, update_notes, update_image_location, update_image_metadata, delete_image,
+    list_images, list_images_page, list_gallery_categories, list_gallery_filters, get_image, add_image, update_rating, update_notes, update_image_location, update_image_metadata, delete_image, cleanup_missing_images,
     list_presets, get_preset, add_preset, save_workflow_preset,
     save_recipe, list_recipes,
     get_config, set_config,
@@ -68,7 +69,7 @@ router = APIRouter(route_class=NoCacheRoute)
 class GenerateRequest(BaseModel):
     prompt: str = ""
     negative_prompt: str = ""
-    model_name: str = "waiIllustriousSDXL_v170.safetensors"
+    model_name: str = "example-model-v1.safetensors"
     workflow_id: int = 0
     steps: int = 20
     cfg: float = 7.0
@@ -232,36 +233,55 @@ def _read_image_meta(path: Path) -> dict:
 
 def _scan_output_gallery() -> int:
     root = _output_dir(); added = 0
-    for path in root.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}: continue
-        try: st = path.stat()
-        except OSError: continue
-        conn = _get_db()
-        exists = conn.execute("SELECT id FROM gallery_images WHERE file_path=?", (str(path),)).fetchone()
-        conn.close()
-        meta = _read_image_meta(path)
-        # output 根目录图片为未分类；首层子目录就是分类。
-        try:
-            relative_parts = path.relative_to(root).parts
-            category = _safe_category(relative_parts[0]) if len(relative_parts) > 1 else "未分类"
-        except ValueError:
-            category = "未分类"
-        if exists:
-            # 重扫时同步纠正旧记录分类，避免历史记录永远停留在未分类。
-            conn = _get_db()
-            conn.execute("UPDATE gallery_images SET category=? WHERE id=?", (category, exists["id"]))
-            conn.commit(); conn.close()
-            # 旧图库记录也要在重新扫描时补齐 PNG 元数据，尤其是反向提示词。
-            if meta.get("negative_prompt") or meta.get("prompt"):
-                update_image_metadata(exists["id"], meta["prompt"], meta["negative_prompt"], meta["model_name"], meta["lora_name"], int(meta["steps"] or 20), float(meta["cfg"] or 7), int(meta["seed"] or -1))
-            continue
-        w=h=0
-        try:
-            from PIL import Image
-            with Image.open(path) as im: w,h=im.size
-        except Exception: pass
-        add_image(str(path), path.name, st.st_size, w, h, meta["prompt"], meta["negative_prompt"], meta["model_name"], meta["lora_name"], steps=int(meta["steps"] or 20), cfg=float(meta["cfg"] or 7), seed=int(meta["seed"] or -1), category=category)
-        added += 1
+    if not root.is_dir():
+        return 0
+    # 1. 批量读取已有路径到 set，避免逐条 SQL
+    conn = _get_db()
+    existing = set()
+    for row in conn.execute("SELECT file_path FROM gallery_images").fetchall():
+        existing.add(str(row["file_path"]).lower())
+    conn.close()
+    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+    # 2. 用 os.walk 快速遍历目录
+    for dirpath, _, filenames in os.walk(str(root)):
+        for fname in filenames:
+            ext = Path(fname).suffix.lower()
+            if ext not in IMAGE_EXTS:
+                continue
+            fpath = str(Path(dirpath) / fname)
+            try:
+                st = os.stat(fpath)
+            except OSError:
+                continue
+            # 3. 按分类归类
+            try:
+                rel = Path(fpath).relative_to(root).parts
+                category = _safe_category(rel[0]) if len(rel) > 1 else "未分类"
+            except ValueError:
+                category = "未分类"
+            if fpath.lower() in existing:
+                # 已存在：只更新分类，不重新读元数据
+                conn = _get_db()
+                conn.execute("UPDATE gallery_images SET category=? WHERE file_path=?", (category, fpath))
+                conn.commit(); conn.close()
+                continue
+            # 4. 新文件：读元数据 + 添加
+            meta = _read_image_meta(Path(fpath))
+            w = h = 0
+            try:
+                from PIL import Image
+                with Image.open(fpath) as im:
+                    w, h = im.size
+            except Exception:
+                pass
+            add_image(fpath, fname, st.st_size, w, h,
+                      meta.get("prompt", ""), meta.get("negative_prompt", ""),
+                      meta.get("model_name", ""), meta.get("lora_name", ""),
+                      steps=int(meta.get("steps") or 20), cfg=float(meta.get("cfg") or 7),
+                      seed=int(meta.get("seed") or -1), category=category,
+                      generated_at=datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"))
+            existing.add(fpath.lower())
+            added += 1
     return added
 
 def _scan_comfy_history_gallery() -> int:
@@ -280,7 +300,9 @@ def _scan_comfy_history_gallery() -> int:
     existing = set()
     conn = _get_db()
     try:
-        for row in conn.execute("SELECT file_name FROM gallery_images").fetchall(): existing.add(row["file_name"])
+        for row in conn.execute("SELECT file_name, file_path FROM gallery_images").fetchall():
+            existing.add(row["file_name"])
+            existing.add(Path(row["file_path"]).name)
     finally: conn.close()
     # newest first; history record uses prompt id + output filename as a stable de-dup key.
     for prompt_id, record in sorted(history.items(), key=lambda kv: str(kv[1].get("status", {}).get("completed", "")), reverse=True):
@@ -289,7 +311,7 @@ def _scan_comfy_history_gallery() -> int:
             for item in node.get("images", []) if isinstance(node, dict) else []:
                 filename, subfolder, image_type = item.get("filename", ""), item.get("subfolder", ""), item.get("type", "output")
                 key = f"history_{prompt_id}_{subfolder}_{filename}"
-                if not filename or key in existing: continue
+                if not filename or key in existing or filename in existing: continue
                 try:
                     r=requests.get(f"{api_url}/view", params={"filename":filename,"subfolder":subfolder,"type":image_type}, timeout=45); r.raise_for_status()
                     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -297,8 +319,10 @@ def _scan_comfy_history_gallery() -> int:
                     local.write_bytes(r.content)
                     w,h=width_from_bytes(r.content)
                     category=_safe_category(Path(subfolder).name if subfolder else "未分类")
-                    add_image(str(local), key, len(r.content), w,h, model_name="", category=category)
-                    existing.add(key); added += 1
+                    completed_ts = record.get("status", {}).get("completed", "")
+                    gen_time = datetime.fromtimestamp(float(completed_ts)).strftime("%Y-%m-%d %H:%M:%S") if completed_ts else None
+                    add_image(str(local), key, len(r.content), w,h, model_name="", category=category, generated_at=gen_time)
+                    existing.add(key); existing.add(filename); existing.add(local.name); added += 1
                 except Exception: continue
     return added
 
@@ -494,7 +518,7 @@ def width_from_bytes(data: bytes) -> tuple:
 
 # ── 异步生图任务（UI 轮询用；线程只在插件进程内存中保留） ────────────────
 _generation_tasks: dict[str, dict] = {}
-_generation_tasks_lock = threading.Lock()
+_generation_tasks_lock = threading.RLock()
 
 def _store_generated_images(result: dict, params: dict) -> dict:
     """将一次 ComfyUI 成功结果写入图库，返回 gallery ids。"""
@@ -506,7 +530,8 @@ def _store_generated_images(result: dict, params: dict) -> dict:
         for x in enabled_loras
     ) or params.get("lora_name", "")
     for img_data in all_images:
-        img = add_image(file_path=img_data["image_path"], file_name=img_data["file_name"], file_size=img_data.get("file_size", 0), width=img_data.get("width", 0), height=img_data.get("height", 0), prompt=params.get("prompt", ""), negative_prompt=params.get("negative_prompt", ""), model_name=params.get("model_name", ""), lora_name=gallery_lora_name, category=_safe_category(params.get("category", "未分类")), steps=params.get("steps", 20), cfg=params.get("cfg", 7.0), seed=result.get("seed", -1))
+        gen_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        img = add_image(file_path=img_data["image_path"], file_name=img_data["file_name"], file_size=img_data.get("file_size", 0), width=img_data.get("width", 0), height=img_data.get("height", 0), prompt=params.get("prompt", ""), negative_prompt=params.get("negative_prompt", ""), model_name=params.get("model_name", ""), lora_name=gallery_lora_name, category=_safe_category(params.get("category", "未分类")), steps=params.get("steps", 20), cfg=params.get("cfg", 7.0), seed=result.get("seed", -1), generated_at=gen_time)
         gallery_ids.append(img["id"])
     result["gallery_id"] = gallery_ids[0] if gallery_ids else None
     result["all_gallery_ids"] = gallery_ids
@@ -613,7 +638,8 @@ def _run_upscale_task(task_id: str, image_name: str, profile: str, category: str
             raise RuntimeError(result.get("error", "放大失败"))
         all_images=result.get("all_images", [result]); ids=[]; label=next((x["label"] for x in _upscale_models() if x["id"] == profile), profile)
         for img_data in all_images:
-            img=add_image(file_path=img_data["image_path"], file_name=img_data["file_name"], file_size=img_data.get("file_size",0), width=img_data.get("width",0), height=img_data.get("height",0), prompt=source.get("prompt", ""), negative_prompt=source.get("negative_prompt", ""), model_name="放大 · " + label, lora_name=source.get("lora_name", ""), category=_safe_category(category), steps=source.get("steps",20), cfg=source.get("cfg",7.0), seed=source.get("seed",-1)); ids.append(img["id"])
+            gen_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            img=add_image(file_path=img_data["image_path"], file_name=img_data["file_name"], file_size=img_data.get("file_size",0), width=img_data.get("width",0), height=img_data.get("height",0), prompt=source.get("prompt", ""), negative_prompt=source.get("negative_prompt", ""), model_name="放大 · " + label, lora_name=source.get("lora_name", ""), category=_safe_category(category), steps=source.get("steps",20), cfg=source.get("cfg",7.0), seed=source.get("seed",-1), generated_at=gen_time); ids.append(img["id"])
         with _generation_tasks_lock:
             if task_id in _generation_tasks:
                 t = _generation_tasks[task_id]
@@ -779,6 +805,20 @@ def api_bind_workflow(payload: WorkflowBindRequest):
         supports_negative_prompt=1 if payload.supports_negative_prompt else 0,
     )
 
+@router.post("/workflows/one-click-setup")
+def api_one_click_setup():
+    """无模型参数的一键适配：扫描当前资源并绑定一个可用主模型。"""
+    resources = discover_resources(_comfyui_url())
+    models = [m for m in (resources.get("models_flat") or []) if m.get("kind") in {"checkpoints", "unet", "diffusion_models"}]
+    if not models:
+        raise HTTPException(400, "当前 ComfyUI 未检测到可适配的主模型")
+    def rank(m):
+        typ=m.get("model_type", "")
+        return (0 if typ == "anima_qwen_unet" else 1 if typ in {"sdxl_illustrious","sdxl_realistic","sdxl"} else 2, str(m.get("name", "")).lower())
+    selected=sorted(models, key=rank)[0]
+    bound=api_auto_bind_workflow(selected["name"])
+    return {"success":True,"message":"已完成一键自动适配："+selected["name"],"selected_model":selected["name"],"binding":bound,"summary":{"total_models":len(models),"loras":len(resources.get("resources",{}).get("loras",[])),"samplers":len(resources.get("samplers",[]))}}
+
 @router.post("/workflows/auto-bind")
 def api_auto_bind_workflow(model_name: str = Query(...)):
     """按模型类型自动创建最小可运行绑定，不再依赖 AI 猜测。"""
@@ -841,6 +881,149 @@ def api_stop_generation_task(task_id: str):
         task["cancel_requested"] = True
         task["message"] = "将在当前图片结束后停止等待"
         return {"success":True, "message":task["message"]}
+
+# ── 待放大区（upscale queue）──────────────────────────────────────────────
+_upscale_queue: list[dict] = []
+_upscale_queue_lock = threading.Lock()
+_upscale_queue_id_counter = 0
+
+@router.get("/upscale/queue")
+def api_upscale_queue_list():
+    with _upscale_queue_lock:
+        return {"items": list(_upscale_queue), "total": len(_upscale_queue)}
+
+@router.post("/upscale/queue/add/gallery/{image_id}")
+def api_upscale_queue_add_gallery(image_id: int):
+    img = get_image(image_id)
+    if not img:
+        raise HTTPException(404, "图片不存在")
+    path = Path(img.get("file_path", ""))
+    if not path.is_file():
+        raise HTTPException(404, "原文件不存在")
+    global _upscale_queue_id_counter
+    with _upscale_queue_lock:
+        _upscale_queue_id_counter += 1
+        _upscale_queue.append({
+            "id": _upscale_queue_id_counter,
+            "image_id": image_id,
+            "file_path": str(path),
+            "file_name": path.name,
+            "category": img.get("category", "未分类"),
+            "source": "gallery",
+            "profile": ""
+        })
+        return {"success": True, "item_id": _upscale_queue_id_counter, "total": len(_upscale_queue)}
+
+@router.post("/upscale/queue/add/batch")
+def api_upscale_queue_add_batch(payload: BatchImagesRequest):
+    ids = list(dict.fromkeys(payload.image_ids))
+    if not ids:
+        raise HTTPException(400, "请至少选择一张图库图片")
+    if len(ids) > 50:
+        raise HTTPException(400, "单次最多添加 50 张")
+    added = []
+    global _upscale_queue_id_counter
+    with _upscale_queue_lock:
+        for image_id in ids:
+            img = get_image(image_id)
+            if not img: continue
+            path = Path(img.get("file_path", ""))
+            if not path.is_file(): continue
+            _upscale_queue_id_counter += 1
+            _upscale_queue.append({
+                "id": _upscale_queue_id_counter,
+                "image_id": image_id,
+                "file_path": str(path),
+                "file_name": path.name,
+                "category": img.get("category", "未分类"),
+                "source": "gallery",
+                "profile": ""
+            })
+            added.append(_upscale_queue_id_counter)
+    return {"success": True, "added": len(added), "items": added, "total": len(_upscale_queue)}
+
+@router.post("/upscale/queue/add/upload")
+async def api_upscale_queue_add_upload(image: UploadFile = File(...), category: str = Query("未分类")):
+    data = await image.read()
+    if not data: raise HTTPException(400, "没有收到图片")
+    if len(data) > 80 * 1024 * 1024: raise HTTPException(400, "图片超过 80MB")
+    safe_name = image.filename or "image.png"
+    upload_dir = IMAGES_DIR / "_upload_queue"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    local_path = upload_dir / safe_name
+    # 避免重名覆盖
+    if local_path.exists():
+        stem = local_path.stem
+        i = 1
+        while local_path.exists():
+            local_path = upload_dir / f"{stem}_{i}{local_path.suffix}"
+            i += 1
+    local_path.write_bytes(data)
+    global _upscale_queue_id_counter
+    with _upscale_queue_lock:
+        _upscale_queue_id_counter += 1
+        _upscale_queue.append({
+            "id": _upscale_queue_id_counter,
+            "image_id": None,
+            "file_path": str(local_path),
+            "file_name": local_path.name,
+            "category": category,
+            "source": "upload",
+            "profile": ""
+        })
+        return {"success": True, "item_id": _upscale_queue_id_counter, "file_name": local_path.name, "total": len(_upscale_queue)}
+
+@router.post("/upscale/queue/remove/{item_id}")
+def api_upscale_queue_remove(item_id: int):
+    with _upscale_queue_lock:
+        before = len(_upscale_queue)
+        _upscale_queue[:] = [x for x in _upscale_queue if x["id"] != item_id]
+        removed = before - len(_upscale_queue)
+        return {"success": True, "removed": removed, "total": len(_upscale_queue)}
+
+@router.post("/upscale/queue/clear")
+def api_upscale_queue_clear():
+    with _upscale_queue_lock:
+        _upscale_queue.clear()
+    return {"success": True, "total": 0}
+
+@router.post("/upscale/queue/start")
+def api_upscale_queue_start(profile: str = Query(...)):
+    if not profile: raise HTTPException(400, "请选择放大模型")
+    if profile not in {x["id"] for x in _upscale_models()}:
+        raise HTTPException(400, "当前放大模型不可用，请刷新后重新选择")
+    with _upscale_queue_lock:
+        items = list(_upscale_queue)
+        _upscale_queue.clear()
+    if not items: raise HTTPException(400, "待放大区是空的")
+    task_id = uuid.uuid4().hex
+    sources = []
+    for item in items:
+        path = Path(item["file_path"])
+        if not path.is_file(): continue
+        img_info = {"file_path": str(path), "file_name": item["file_name"]}
+        if item.get("image_id"):
+            img_data = get_image(item["image_id"])
+            if img_data: img_info = img_data
+        sources.append({
+            "id": item.get("image_id") or item["id"],
+            "path": item["file_path"],
+            "name": item["file_name"],
+            "category": item["category"],
+            "source": img_info
+        })
+    if not sources: raise HTTPException(404, "待放大区图片均不存在或原文件已丢失")
+    with _generation_tasks_lock:
+        _generation_tasks[task_id] = {
+            "id": task_id, "kind": "upscale", "state": "queued",
+            "total": len(sources), "current": 0, "completed": 0, "failed": 0,
+            "gallery_ids": [], "failures": [],
+            "message": f"待放区 {len(sources)} 张图片已提交放大",
+            "created_at": time.time(), "cancel_requested": False
+        }
+    threading.Thread(target=_run_upscale_batch_task, args=(task_id, sources, profile),
+                     daemon=True, name=f"upscale-queue-{task_id[:8]}").start()
+    return {"success": True, "task_id": task_id, "total": len(sources)}
 
 @router.get("/upscale/profiles")
 def api_upscale_profiles():
@@ -926,6 +1109,10 @@ def api_list_images(query: str = "", model_name: str = "", lora_name: str = "", 
     # 大图库安全模式：数据库分页，前端只拿当前窗口，避免上百 GB 图片拖死进程。
     items, total = list_images_page(query, model_name, lora_name, min_rating, category, sort, limit, offset)
     return {"items": items, "total": total, "limit": limit, "offset": offset, "has_more": offset + len(items) < total}
+
+@router.get("/gallery/filters")
+def api_gallery_filters(category: str = ""):
+    return list_gallery_filters(category)
 
 def _run_gallery_scan_task(task_id: str) -> None:
     try:
@@ -1068,6 +1255,12 @@ def api_batch_delete_images(payload: BatchImagesRequest):
         raise HTTPException(400, {"error": "没有图片完成删除", "failed": failed})
     return {"success": True, "deleted": deleted, "failed": failed}
 
+@router.post("/gallery/cleanup-missing")
+def api_cleanup_missing_images():
+    """清理源文件已不存在（被外部删除/产物库回收）的图库记录。"""
+    count = cleanup_missing_images()
+    return {"success": True, "cleaned": count, "message": f"已清理 {count} 条无源文件记录"}
+
 @router.get("/images/{image_id}")
 def api_get_image(image_id: int):
     img = get_image(image_id)
@@ -1149,6 +1342,17 @@ def api_apply_workflow_preset(preset_id: int, model_name: str = ""):
         supports_negative_prompt=1,
     )
 
+@router.post("/repair")
+def api_repair():
+    """安全恢复插件本地配置：清理失效绑定和提示词草稿，不删除图库原图。"""
+    conn=_get_db()
+    try:
+        conn.execute("DELETE FROM workflow_bindings")
+        conn.execute("DELETE FROM config WHERE key IN ('comfyui_output_dir')")
+        conn.commit()
+    finally: conn.close()
+    return {"success":True,"message":"已恢复插件配置；图库原图和图片记录未删除，请重新扫描/自动适配"}
+
 # ── 配置 ─────────────────────────────────────────────────────────────────────
 
 @router.get("/config")
@@ -1164,8 +1368,17 @@ def api_patch_config(key: str, payload: ConfigPatch):
     if key not in {"comfyui_api_url", "comfyui_api_url_alt", "comfyui_output_dir"}:
         raise HTTPException(400, "不允许修改此配置")
     if key == "comfyui_output_dir":
-        Path(payload.value).mkdir(parents=True, exist_ok=True)
-    set_config(key, payload.value)
+        raw=(payload.value or "").strip()
+        if not raw: raise HTTPException(400, "输出目录不能为空")
+        path=Path(raw).expanduser()
+        if not path.is_absolute(): raise HTTPException(400, "输出目录必须使用绝对路径")
+        # 只允许真实目录或其已有父目录，避免插件被误用来创建任意深层路径。
+        parent=path if path.exists() else path.parent
+        if not parent.is_dir(): raise HTTPException(400, "输出目录或其父目录不存在")
+        if any(part in {"Windows","System32","Program Files"} for part in path.parts): raise HTTPException(400, "不允许使用系统目录作为输出目录")
+        set_config(key, str(path))
+    else:
+        set_config(key, payload.value)
     return {"success": True}
 
 # ── 聊天代理 ──────────────────────────────────────────────────────────────────
@@ -1258,13 +1471,13 @@ def api_list_recipes():
 
 # ── Agent 工具 ──────────────────────────────────────────────────────────────
 
-def image_gen_generate(prompt: str = "", negative_prompt: str = "", model_name: str = "waiIllustriousSDXL_v170.safetensors", steps: int = 20, cfg: float = 7.0, width: int = 1024, height: int = 1024, lora_name: str = "", lora_strength: float = 0.6) -> dict:
+def image_gen_generate(prompt: str = "", negative_prompt: str = "", model_name: str = "example-model.safetensors", steps: int = 20, cfg: float = 7.0, width: int = 1024, height: int = 1024, lora_name: str = "", lora_strength: float = 0.6) -> dict:
     """使用 ComfyUI 生成图片。返回生成结果和图片在插件图库中的 ID。
     
     参数说明：
     - prompt: 正向提示词（描述你想生成的画面）
     - negative_prompt: 负向提示词（描述你不想要的元素）
-    - model_name: 模型名称（如 waiIllustriousSDXL_v170.safetensors）
+    - model_name: 模型名称（如 example-model.safetensors）
     - steps: 采样步数（默认20，越高越精细但越慢）
     - cfg: 提示词相关性（默认7.0，越高越贴合提示词）
     - width/height: 图片尺寸
@@ -1305,6 +1518,44 @@ def image_gen_check_status() -> dict:
     except Exception as e:
         return {"connected": False, "error": str(e)}
 
+def image_gen_register_workflow_preset(name: str, workflow_json: str = "{}", description: str = "",
+                                        model_type: str = "custom", params_schema: str = "",
+                                        sort_order: int = 1000) -> dict:
+    """注册一个自定义 ComfyUI 工作流预设。workflow_json 是符合 ComfyUI API 格式的工作流 JSON 字符串。"""
+    try:
+        import json as _json
+        wf = _json.loads(workflow_json) if isinstance(workflow_json, str) else workflow_json
+        ps = _json.loads(params_schema) if isinstance(params_schema, str) and params_schema else DEFAULT_PARAM_SCHEMA.copy()
+        result = save_workflow_preset(
+            name=name, description=description, model_type=model_type,
+            workflow_json=_json.dumps(wf, ensure_ascii=False),
+            params_schema=_json.dumps(ps, ensure_ascii=False),
+            sort_order=sort_order
+        )
+        return {"success": True, "preset_id": result.get("id"), "preset": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def image_gen_apply_workflow_preset(preset_id: int, model_name: str) -> dict:
+    """将一个已注册的工作流预设绑定到指定模型，使其在生图面板中生效。"""
+    try:
+        preset = get_preset(preset_id)
+        if not preset:
+            return {"success": False, "error": "预设不存在"}
+        result = upsert_binding(
+            model_name=model_name,
+            workflow_id="preset:" + str(preset_id),
+            workflow_name=preset.get("name") or "自定义工作流",
+            workflow_type=preset.get("model_type") or "custom",
+            workflow_json=preset.get("workflow_json") or "{}",
+            params_schema=preset.get("params_schema") or "",
+            supports_lora=1,
+            supports_negative_prompt=1,
+        )
+        return {"success": True, "binding": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 # ── 插件注册 ────────────────────────────────────────────────────────────────
 
 class ImageGenPlugin:
@@ -1332,6 +1583,22 @@ class ImageGenPlugin:
             tool_name="image_gen_check_status",
             tool_func=image_gen_check_status,
             description="检查 ComfyUI 的运行状态和可用模型",
+            icon="🔌",
+            enabled=True,
+            tool_type="function"
+        )
+        api.register_tool(
+            tool_name="image_gen_register_workflow_preset",
+            tool_func=image_gen_register_workflow_preset,
+            description="注册自定义 ComfyUI 工作流预设。AI 可以用来创建新的工作流模板，参数 workflow_json 是符合 ComfyUI API 格式的工作流 JSON 字符串（必须是字典的 JSON）。",
+            icon="⚙️",
+            enabled=True,
+            tool_type="function"
+        )
+        api.register_tool(
+            tool_name="image_gen_apply_workflow_preset",
+            tool_func=image_gen_apply_workflow_preset,
+            description="将已注册的工作流预设绑定到指定模型，使该模型使用自定义工作流生成图片。",
             icon="🔌",
             enabled=True,
             tool_type="function"
