@@ -13,13 +13,13 @@ name: image-gen-assist
 - 插件页面上下分栏：**上部分**是控制面板（模型选择、填 prompt、调参数、看图库），**下部分**是聊天区（跟 agent 对话）
 - ComfyUI API 桥接（自动检测端口 8188~8199）
 - SQLite 图库（图片 + 星级评分 + 完整生图参数记录）
-- 3 个注册的 Agent 工具
+- 9 个注册的 Agent 工具
 
 ---
 
 ## Agent 可用工具
 
-### `image_gen_generate` — 生图
+### `image_gen_generate` — 生图（文生图 / 以图生图）
 ```json
 参数说明：
 - prompt (必需): 正向提示词，描述画面内容
@@ -27,11 +27,29 @@ name: image-gen-assist
 - model_name: 模型名（默认 example-model.safetensors）
 - steps: 采样步数（默认 20）
 - cfg: 提示词相关性（默认 7.0）
-- width / height: 图片尺寸（默认 1024×1024）
+- width / height: 图片尺寸（默认 1024×1024；传了 reference_image 且保持默认时会自动跟随参考图尺寸）
 - seed: 随机种子（-1=随机）
 - lora_name: LoRA 文件名（可选）
 - lora_strength: LoRA 强度（默认 0.6）
+- reference_image: 以图生图的参考图，填图库图片 ID（如 "188"）或本地图片绝对路径；留空 = 普通文生图
+- denoise: 以图生图的重绘幅度（默认 0.6；0.4 轻微改动、0.8 大改），只有传了 reference_image 才生效
 ```
+用户说「照着这张图改 / 用图库里的 XX 做参考 / 以图生图」时：先用 `image_gen_list_images` 找到图片 ID，
+再把 id 作为 `reference_image` 传给本工具。**不要自己编造图片路径**。
+
+### `image_gen_panel_context` — 读取面板当前设置
+用户说「按面板里的设置」「参考图我已经选好了」时调用：返回 generation_mode / model_name / loras /
+reference_image / denoise / 尺寸 / 分类。generation_mode=img2img 时把返回的 reference_image 原样传给
+`image_gen_generate` 即可。
+
+### `image_gen_list_images` — 列出图库图片（找参考图用）
+```json
+参数：
+- query (可选): 关键词，匹配提示词 / 文件名 / 备注 / 模型 / LoRA
+- category (可选): 按分类筛选
+- limit (可选): 返回条数（默认 20，最多 50）
+```
+返回 `items: [{id, category, model_name, width, height, created_at, prompt}]`，按生成时间倒序。
 
 ### `image_gen_set_rating` — 给图片评分
 ```json

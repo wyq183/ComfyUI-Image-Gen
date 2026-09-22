@@ -1,13 +1,82 @@
 # -*- coding: utf-8 -*-
-"""生图助手 — 图片与配置存储层（SQLite）"""
+"""生图助手 — 图片与配置存储层（SQLite）
+
+数据目录放在**插件目录之外**（``%APPDATA%\\QwenPaw\\qwenpaw-image-gen``）：
+插件升级或卸载会删除插件自身目录，如果数据放在里面，用户的图库记录、分类、
+星级备注、生成结果与 API 配置都会一并丢失。放到插件目录外可彻底避免。
+
+旧版本（≤1.1.10）的数据放在插件目录内，首次启动时会自动迁移过来。
+"""
 from __future__ import annotations
 import json, os, time, shutil, sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
-DB_DIR = Path(__file__).resolve().parent.parent / "data"
+# ── 数据目录（插件目录外，卸载插件不会丢）───────────────────────────────────
+_APP_DATA = Path(os.environ.get("APPDATA") or str(Path.home() / ".qwenpaw"))
+DATA_ROOT = _APP_DATA / "QwenPaw" / "qwenpaw-image-gen"
+DB_DIR = DATA_ROOT
 DB_PATH = DB_DIR / "image_gen.db"
 IMAGES_DIR = DB_DIR / "images"
+BACKUP_DIR = DB_DIR / "backups"
+
+# 旧版数据目录（插件目录内）；仅用于一次性迁移。
+LEGACY_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+MAX_BACKUPS = 7
+
+
+def _migrate_legacy_data() -> None:
+    """把旧版插件目录内的数据迁移到插件目录外（只复制，不删除旧数据）。
+
+    迁移是幂等的：新位置已有同名文件时跳过，因此重复启动不会覆盖新数据。
+    """
+    if not LEGACY_DATA_DIR.is_dir():
+        return
+    try:
+        DB_DIR.mkdir(parents=True, exist_ok=True)
+        legacy_db = LEGACY_DATA_DIR / "image_gen.db"
+        if legacy_db.is_file() and not DB_PATH.is_file():
+            shutil.copy2(legacy_db, DB_PATH)
+
+        legacy_images = LEGACY_DATA_DIR / "images"
+        if legacy_images.is_dir():
+            IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+            for item in legacy_images.rglob("*"):
+                if not item.is_file():
+                    continue
+                target = IMAGES_DIR / item.relative_to(legacy_images)
+                if target.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(item, target)
+                except OSError:
+                    pass
+    except OSError:
+        # 迁移失败不应阻塞插件启动；下次启动会再试。
+        pass
+
+
+def _backup_database() -> None:
+    """每天首次启动时备份一次数据库，保留最近若干份，防止意外损坏后无法恢复。"""
+    if not DB_PATH.is_file():
+        return
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d")
+        target = BACKUP_DIR / f"image_gen_{stamp}.db"
+        if not target.is_file():
+            shutil.copy2(DB_PATH, target)
+        backups = sorted(BACKUP_DIR.glob("image_gen_*.db"))
+        for old in backups[:-MAX_BACKUPS]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
 
 def _get_db() -> sqlite3.Connection:
     DB_DIR.mkdir(parents=True, exist_ok=True)
@@ -18,6 +87,8 @@ def _get_db() -> sqlite3.Connection:
 
 def init_db():
     """初始化数据库表结构"""
+    _migrate_legacy_data()
+    _backup_database()
     conn = _get_db()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS workflow_presets (

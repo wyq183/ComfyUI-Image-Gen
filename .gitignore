@@ -27,3 +27,4 @@ check_*.js
 .idea/
 .DS_Store
 Thumbs.db
+*_TODO.md 
